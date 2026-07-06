@@ -1,0 +1,80 @@
+# XcodeGen spec. Generate the (gitignored) .xcodeproj with:  xcodegen generate --spec mac/project.yml
+# Keeping the project as a diffable YAML spec plays nicely with jj (no giant pbxproj blob).
+name: SiteBlocker
+options:
+  bundleIdPrefix: com.pauljohnson.siteblocker
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+
+packages:
+  RulesEngine:
+    path: ../RulesEngine
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    # Interpolated from the environment at `xcodegen generate` time (justfile loads .env).
+    DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  SiteBlocker:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+    dependencies:
+      - package: RulesEngine
+      - target: FilterExtension
+        embed: true
+        codeSign: true
+    # XcodeGen generates App/Info.plist (gitignored), injecting CFBundleIdentifier etc. from build
+    # settings and merging these custom keys. A hand-written plist missing CFBundleIdentifier builds
+    # fine but fails `xcodebuild archive` with "Archive Missing Bundle Identifier".
+    info:
+      path: App/Info.plist
+      properties:
+        LSApplicationCategoryType: public.app-category.productivity
+        NSSystemExtensionUsageDescription: SiteBlocker uses a content filter to block distracting sites according to your rules.
+        # Menu-bar / agent app: no Dock icon, no default window at launch.
+        LSUIElement: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.app
+        CODE_SIGN_ENTITLEMENTS: App/SiteBlocker.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        # Build directly against a manually-created Developer ID (distribution) profile — the only
+        # kind that carries content-filter-provider-systemextension. Dev profiles can't, so we skip
+        # development signing entirely. Profile names come from .env.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: Developer ID Application
+        PROVISIONING_PROFILE_SPECIFIER: ${APP_PROVISIONING_PROFILE}
+        # Disable Xcode 16's SwiftUI-previews "debug dylib" split. It's for in-Xcode previews and
+        # trips CLI/CI builds of an app embedding an extension with a bogus `Module name ""` error.
+        ENABLE_DEBUG_DYLIB: NO
+        # Drives the real content filter. Remove this line to build against MockEnforcer instead.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: ENABLE_NETWORK_EXTENSION
+
+  FilterExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: FilterExtension
+    dependencies:
+      - package: RulesEngine
+    info:
+      path: FilterExtension/Info.plist
+      properties:
+        CFBundlePackageType: SYSX
+        NetworkExtension:
+          NEProviderClasses:
+            com.apple.networkextension.filter-data: $(PRODUCT_MODULE_NAME).FilterDataProvider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.app.FilterExtension
+        CODE_SIGN_ENTITLEMENTS: FilterExtension/FilterExtension.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: Developer ID Application
+        PROVISIONING_PROFILE_SPECIFIER: ${EXT_PROVISIONING_PROFILE}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- Import a blocklist from a user-selected file. -->
+    <key>com.apple.security.files.user-selected.read-only</key>
+    <true/>
+    <!-- Requires the paid Apple Developer account's NetworkExtension capability. -->
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>content-filter-provider-systemextension</string>
+    </array>
+    <!-- Shared container the app and the extension use to exchange the PolicySnapshot. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.pauljohnson.siteblocker</string>
+    </array>
+</dict>
+</plist>
