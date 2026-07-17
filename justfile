@@ -64,6 +64,8 @@ install: generate
 
     ditto -c -k --keepParent "$app" "{{ddata}}/SiteBlocker.zip"
     xcrun notarytool submit "{{ddata}}/SiteBlocker.zip" --keychain-profile "{{notary_profile}}" --wait
+    # Staple the app only. Notarization covers the nested system extension by cdhash; stapling the
+    # nested bundle would modify it after the app sealed it and break the app's --deep signature.
     xcrun stapler staple "$app"
 
     rm -rf /Applications/SiteBlocker.app
@@ -74,6 +76,14 @@ install: generate
 signing-info: generate
     xcodebuild -project {{project}} -scheme {{scheme}} -showBuildSettings \
         | grep -E 'DEVELOPMENT_TEAM|CODE_SIGN|PRODUCT_BUNDLE_IDENTIFIER|PROVISIONING'
+
+# Stream the app's live logs (target-source reads/fetches and their errors)
+logs:
+    log stream --level info --predicate 'subsystem == "com.pauljohnson.siteblocker"'
+
+# Show the app's logs from the last hour
+logs-recent:
+    log show --last 1h --info --predicate 'subsystem == "com.pauljohnson.siteblocker"'
 
 # Show SiteBlocker's system-extension activation status
 sysext-status:

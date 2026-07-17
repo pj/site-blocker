@@ -25,10 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var managementWindow: NSWindow?
     private var iconSync: AnyCancellable?
 
+    #if ENABLE_NETWORK_EXTENSION
+    private let enforcer: SystemExtensionEnforcer
+    #endif
+
     override init() {
         #if ENABLE_NETWORK_EXTENSION
         let enforcer = SystemExtensionEnforcer()
-        enforcer.activateAndEnable()   // prompts for approval in System Settings the first time
+        self.enforcer = enforcer
         store = RuleStore(enforcer: enforcer)
         #else
         store = RuleStore(enforcer: MockEnforcer())
@@ -37,6 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if ENABLE_NETWORK_EXTENSION
+        // Request activation here, not in init(): OSSystemExtensionManager needs a live main run
+        // loop, and a request submitted from init() is silently dropped (no request ever reaches
+        // sysextd, so no approval prompt appears). The first successful request prompts the user
+        // to approve the extension in System Settings › General › Login Items & Extensions.
+        enforcer.activateAndEnable()
+        #endif
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon()
 

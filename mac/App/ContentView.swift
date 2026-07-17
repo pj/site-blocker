@@ -78,14 +78,12 @@ private struct RuleRow: View {
     let rule: Rule
 
     @State private var chips: [Chip]
-    @State private var targets: [EditableTarget]
     @State private var showSites = false
 
     init(rule: Rule) {
         self.rule = rule
         // Legacy OR conditions flatten into one AND group; the UI no longer builds ORs.
         _chips = State(initialValue: ChipGroup.decompose(rule.condition).flatMap(\.chips))
-        _targets = State(initialValue: rule.targets.map { EditableTarget(text: $0.domain) })
     }
 
     var body: some View {
@@ -113,7 +111,6 @@ private struct RuleRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .onChange(of: chips) { commit() }
-        .onChange(of: targets) { commit() }
     }
 
     // MARK: Logic line
@@ -168,7 +165,7 @@ private struct RuleRow: View {
         }
         .controlSize(.small)
         .popover(isPresented: $showSites, arrowEdge: .bottom) {
-            TargetsEditor(targets: $targets)
+            SourceEditor(rule: rule)
                 .padding(12)
                 .frame(width: 400)
         }
@@ -179,22 +176,8 @@ private struct RuleRow: View {
 
     private func commit() {
         var updated = rule
-        updated.targets = normalizedTargets()
         updated.condition = ChipGroup.compose([ChipGroup(chips: chips)])
         store.update(updated)
-    }
-
-    /// The saved rule gets normalized, deduped hosts; the editor rows keep the raw text so typing
-    /// isn't fought by normalization.
-    private func normalizedTargets() -> [HostPattern] {
-        var seen = Set<String>()
-        var out: [HostPattern] = []
-        for target in targets {
-            let host = HostPattern(target.text)
-            guard !host.domain.isEmpty, seen.insert(host.domain).inserted else { continue }
-            out.append(host)
-        }
-        return out
     }
 }
 

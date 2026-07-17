@@ -1,5 +1,10 @@
 import Foundation
+import OSLog
 import RulesEngine
+
+/// Unified-log logger; view with `just logs` (stream) or
+/// `log show --last 1h --predicate 'subsystem == "com.pauljohnson.siteblocker"'`.
+let sourceLog = Logger(subsystem: "com.pauljohnson.siteblocker", category: "sources")
 
 /// The app-side coordinator: owns the rules + usage, recomputes what's blocked, and pushes to the
 /// enforcer. Pure evaluation lives in `BlockEngine`; this type is just the wiring (clock, timer,
@@ -31,6 +36,18 @@ final class RuleStore: ObservableObject {
     /// The daily quota counts wall-clock time with blocking disabled, not time spent on any site.
     private var unblockedSince: Date?
 
+    /// Health of each rule's external target source, for the sites popover.
+    struct SourceStatus: Equatable {
+        var lastUpdated: Date?
+        var error: String?
+    }
+    @Published private(set) var sourceStatus: [UUID: SourceStatus] = [:]
+
+    private var fileModificationDates: [UUID: Date] = [:]
+    private var remoteLastFetch: [UUID: Date] = [:]
+    private var remoteInFlight: Set<UUID> = []
+    private let remoteRefreshInterval: TimeInterval = 4 * 3600
+
     init(enforcer: Enforcer, persistence: PersistenceController = .shared) {
         self.enforcer = enforcer
         self.persistence = persistence
@@ -39,6 +56,7 @@ final class RuleStore: ObservableObject {
         self.rules = loaded.rules
         startTimer()
         registerHotKey()
+        resolveSources(force: Set(rules.map(\.id)))
         refresh()
     }
 
@@ -151,6 +169,123 @@ final class RuleStore: ObservableObject {
         }
     }
 
+    // MARK: Target sources
+
+    /// Point a rule at a new source. Manual sources apply immediately; file/remote kick off a
+    /// resolve so the cached targets refresh right away.
+    func setSource(_ rule: Rule, source: TargetSource) {
+        guard let idx = rules.firstIndex(where: { $0.id == rule.id }) else { return }
+        rules[idx].source = source
+        if case .manual(let hosts) = source {
+            rules[idx].targets = hosts
+            sourceStatus[rule.id] = nil
+        } else {
+            resolveSources(force: [rule.id])
+        }
+    }
+
+    /// Bookmark a user-chosen file so the reference survives relaunches. The app is not sandboxed,
+    /// so a plain bookmark (no security scope) is all that's needed to re-read the file later.
+    func setFileSource(_ rule: Rule, url: URL) {
+        do {
+            let bookmark = try url.bookmarkData(includingResourceValuesForKeys: nil, relativeTo: nil)
+            sourceLog.info("Bookmarked file source \(url.path, privacy: .public)")
+            setSource(rule, source: .file(bookmark: bookmark))
+        } catch {
+            sourceLog.error("Bookmark failed for \(url.path, privacy: .public): \(error, privacy: .public)")
+            setStatus(rule.id, error: "Couldn't access file: \(error.localizedDescription)")
+        }
+    }
+
+    /// Re-fetch a remote source now (the periodic refresh is hours apart).
+    func refreshSource(_ rule: Rule) {
+        resolveSources(force: [rule.id])
+    }
+
+    /// The chosen file's path, for display. `nil` when the bookmark can't resolve.
+    func fileDisplayPath(for rule: Rule) -> String? {
+        guard case .file(let bookmark) = rule.source else { return nil }
+        var stale = false
+        let url = try? URL(resolvingBookmarkData: bookmark, relativeTo: nil, bookmarkDataIsStale: &stale)
+        return url?.path
+    }
+
+    /// Bring file/remote-sourced target caches up to date. Files re-read when their modification
+    /// date changes (checked every refresh tick — cheap stat); remotes re-fetch every few hours.
+    /// Failures keep the cached list — a broken source should never silently unblock sites.
+    private func resolveSources(force: Set<UUID> = []) {
+        for rule in rules {
+            switch rule.source {
+            case .manual:
+                break
+            case .file(let bookmark):
+                resolveFile(rule: rule, bookmark: bookmark, force: force.contains(rule.id))
+            case .remote(let url):
+                let due = force.contains(rule.id) || remoteLastFetch[rule.id].map {
+                    Date().timeIntervalSince($0) > remoteRefreshInterval
+                } ?? true
+                if due { fetchRemote(rule: rule, url: url) }
+            }
+        }
+    }
+
+    private func resolveFile(rule: Rule, bookmark: Data, force: Bool) {
+        do {
+            var stale = false
+            let url = try URL(resolvingBookmarkData: bookmark, relativeTo: nil,
+                              bookmarkDataIsStale: &stale)
+            if stale,
+               let fresh = try? url.bookmarkData(includingResourceValuesForKeys: nil, relativeTo: nil),
+               let idx = rules.firstIndex(where: { $0.id == rule.id }) {
+                sourceLog.info("Refreshed stale bookmark for \(url.path, privacy: .public)")
+                rules[idx].source = .file(bookmark: fresh)
+            }
+            let modified = try url.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate ?? Date()
+            guard force || fileModificationDates[rule.id] != modified else { return }
+            let text = try String(contentsOf: url, encoding: .utf8)
+            fileModificationDates[rule.id] = modified
+            let hosts = TargetImport.parse(text).map { HostPattern($0) }
+            sourceLog.info("Read \(hosts.count) hosts from \(url.path, privacy: .public)")
+            applyResolvedTargets(rule.id, hosts: hosts)
+        } catch {
+            sourceLog.error("File source read failed: \(error, privacy: .public)")
+            setStatus(rule.id, error: "Couldn't read file: \(error.localizedDescription)")
+        }
+    }
+
+    private func fetchRemote(rule: Rule, url: URL) {
+        guard !remoteInFlight.contains(rule.id) else { return }
+        remoteInFlight.insert(rule.id)
+        remoteLastFetch[rule.id] = Date()
+        Task { [weak self] in
+            do {
+                let domains = try await TargetImport.download(from: url)
+                sourceLog.info("Fetched \(domains.count) hosts from \(url.absoluteString, privacy: .public)")
+                self?.remoteInFlight.remove(rule.id)
+                self?.applyResolvedTargets(rule.id, hosts: domains.map { HostPattern($0) })
+            } catch {
+                sourceLog.error("Remote source fetch failed for \(url.absoluteString, privacy: .public): \(error, privacy: .public)")
+                self?.remoteInFlight.remove(rule.id)
+                self?.setStatus(rule.id, error: "Download failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func applyResolvedTargets(_ id: UUID, hosts: [HostPattern]) {
+        if let idx = rules.firstIndex(where: { $0.id == id }), rules[idx].targets != hosts {
+            rules[idx].targets = hosts
+        }
+        setStatus(id, lastUpdated: Date(), error: nil)
+    }
+
+    private func setStatus(_ id: UUID, lastUpdated: Date? = nil, error: String?) {
+        var status = sourceStatus[id] ?? SourceStatus()
+        if let lastUpdated { status.lastUpdated = lastUpdated }
+        status.error = error
+        sourceStatus[id] = status
+    }
+
     private func registerHotKey() {
         hotKey = GlobalHotKey.blockingToggle { [weak self] in
             Task { @MainActor in await self?.toggleBlocking() }
@@ -169,9 +304,13 @@ final class RuleStore: ObservableObject {
     private func startTimer() {
         // Re-evaluate periodically so time-of-day transitions and the unblocked-time countdown
         // take effect without user action. 5s keeps the forcible re-block prompt when a quota
-        // runs out; evaluation is trivial and the snapshot is tiny.
+        // runs out; evaluation is trivial and the snapshot is tiny. Source resolution piggybacks
+        // on the same tick (files re-read only when their mtime changes).
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor in
+                self?.resolveSources()
+                self?.refresh()
+            }
         }
     }
 }

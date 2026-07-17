@@ -1,9 +1,12 @@
 import Foundation
+import OSLog
 import RulesEngine
 
 #if ENABLE_NETWORK_EXTENSION
 @preconcurrency import NetworkExtension
 import SystemExtensions
+
+private let extLog = Logger(subsystem: "com.pauljohnson.siteblocker", category: "sysext")
 #endif
 
 /// Real enforcer backed by the content-filter system extension.
@@ -32,6 +35,7 @@ final class SystemExtensionEnforcer: NSObject, Enforcer {
     /// Step 1: activate the system extension (prompts the user to approve in System Settings the
     /// first time). Step 2: enable the content filter configuration.
     func activateAndEnable() {
+        extLog.error("Submitting activation request for \(Self.extensionBundleID, privacy: .public)")
         let request = OSSystemExtensionRequest.activationRequest(
             forExtensionWithIdentifier: Self.extensionBundleID, queue: .main)
         request.delegate = self
@@ -65,15 +69,17 @@ extension SystemExtensionEnforcer: OSSystemExtensionRequestDelegate {
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
         // The user must approve the extension in System Settings → General → Login Items & Extensions.
+        extLog.error("Extension needs user approval — approve in System Settings › General › Login Items & Extensions")
     }
 
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
+        extLog.error("Activation finished with result \(result.rawValue, privacy: .public)")
         if result == .completed { ensureFilterEnabled() }
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        NSLog("System extension request failed: \(error)")
+        extLog.error("Activation request failed: \(error.localizedDescription, privacy: .public)")
     }
 }
 #endif

@@ -67,12 +67,22 @@ targets:
       path: FilterExtension/Info.plist
       properties:
         CFBundlePackageType: SYSX
+        # macOS 26 (Tahoe) requires network_extension-category system extensions to carry this in
+        # their *own* Info.plist (not just the host app's), or activation fails.
+        NSSystemExtensionUsageDescription: SiteBlocker uses a content filter to block distracting sites according to your rules.
         NetworkExtension:
           NEProviderClasses:
             com.apple.networkextension.filter-data: $(PRODUCT_MODULE_NAME).FilterDataProvider
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.app.FilterExtension
+        # A system extension's executable (and thus its .systemextension bundle) must be named
+        # exactly its bundle identifier, or OSSystemExtensionRequest fails with "Extension not found
+        # in App bundle / no matched extension" — enforced strictly since macOS 26 (Tahoe). Pin the
+        # Swift module name separately so `$(PRODUCT_MODULE_NAME).FilterDataProvider` in the Info
+        # plist's NEProviderClasses stays `FilterExtension.FilterDataProvider`.
+        PRODUCT_NAME: $(PRODUCT_BUNDLE_IDENTIFIER)
+        PRODUCT_MODULE_NAME: FilterExtension
         CODE_SIGN_ENTITLEMENTS: FilterExtension/FilterExtension.entitlements
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_STYLE: Manual

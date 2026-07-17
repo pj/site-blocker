@@ -2,14 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>com.apple.security.app-sandbox</key>
+    <!-- The container app is deliberately NOT sandboxed. For Developer ID distribution (not the
+         Mac App Store), the app that activates a content-filter *system extension* must be able to
+         talk to sysextd; the App Sandbox blocks that XPC/mach-lookup, so OSSystemExtensionRequest
+         fails immediately with "connection invalidated" / OSSystemExtensionErrorDomain error 1.
+         The sandbox also blocked reading user files (the blocklist). Only the FilterExtension is
+         sandboxed (required for system extensions); it reads the shared snapshot via the App Group.
+         Hardened runtime + notarization still apply. -->
+
+    <!-- Authorizes the app to install its content-filter *system extension* via
+         OSSystemExtensionRequest. sysextd rejects activation without it ("Missing entitlement
+         com.apple.developer.system-extension.install"). -->
+    <key>com.apple.developer.system-extension.install</key>
     <true/>
-    <key>com.apple.security.network.client</key>
-    <true/>
-    <!-- Import a blocklist from a user-selected file. -->
-    <key>com.apple.security.files.user-selected.read-only</key>
-    <true/>
-    <!-- Requires the paid Apple Developer account's NetworkExtension capability. -->
+    <!-- NetworkExtension capability (paid Apple Developer account). -->
     <key>com.apple.developer.networking.networkextension</key>
     <array>
         <string>content-filter-provider-systemextension</string>
