@@ -166,6 +166,19 @@ final class DailyUsageTests: XCTestCase {
         XCTAssertEqual(usage.totalUsage(on: date(2026, 7, 6, 12)), 35 * 60)
         XCTAssertEqual(usage.usage(rule: a, on: date(2026, 7, 8)), 0)
     }
+
+    func testMergeTakingMaxNeverGivesBackTime() {
+        let a = UUID(), b = UUID()
+        var local = DailyUsage(calendar: utc)
+        local.record(20 * 60, rule: a, at: date(2026, 7, 6, 9))   // spent 20m on a here
+        var remote = DailyUsage(calendar: utc)
+        remote.record(5 * 60, rule: a, at: date(2026, 7, 6, 9))    // a stale/smaller value for a
+        remote.record(15 * 60, rule: b, at: date(2026, 7, 6, 9))   // time spent on b elsewhere
+
+        local.mergeTakingMax(remote)
+        XCTAssertEqual(local.usage(rule: a, on: date(2026, 7, 6, 12)), 20 * 60)  // kept the larger
+        XCTAssertEqual(local.usage(rule: b, on: date(2026, 7, 6, 12)), 15 * 60)  // gained the other device's
+    }
 }
 
 final class CodableTests: XCTestCase {

@@ -8,6 +8,9 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 
+# Distributable produced by `just package`
+SiteBlocker-dist.zip
+
 # Signing config (Team ID etc.)
 .env
 

@@ -70,8 +70,32 @@ final class RuleStore: ObservableObject {
         self.rules = loaded.rules
         startTimer()
         registerHotKey()
+        observeCloudChanges()
         resolveSources(force: Set(rules.map(\.id)))
         refresh()
+    }
+
+    /// React to iCloud key-value changes pushed from another device: merge them into memory (usage
+    /// by max, rules by last-writer-wins) and re-resolve any file/URL sources whose caches were
+    /// stripped for sync.
+    private func observeCloudChanges() {
+        NotificationCenter.default.addObserver(
+            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+            object: NSUbiquitousKeyValueStore.default, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self,
+                      let merged = self.persistence.mergeFromCloud(currentRules: self.rules,
+                                                                   currentUsage: self.usage)
+                else { return }
+                self.usage = merged.usage
+                if merged.rules != self.rules {
+                    self.rules = merged.rules   // didSet persists + refreshes
+                    self.resolveSources(force: Set(self.rules.map(\.id)))
+                } else {
+                    self.refresh()
+                }
+            }
+        }
     }
 
     /// Viewing time used today for a rule, and how much of its budget remains.
@@ -105,11 +129,19 @@ final class RuleStore: ObservableObject {
             unlockedSince = nil
         }
 
+        let previousBlocked = lastBlocked
         blockedNow = engine.blockedPatterns(unlocked: isUnlocked, in: context, usage: usageLookup)
         enforcer.apply(blockedPatterns: blockedNow)
         if blockedNow != lastBlocked {
             lastBlocked = blockedNow
             persistence.writeSnapshot(PolicySnapshot(blockedPatterns: blockedNow))
+        }
+
+        // Sites that just became blocked (re-lock, window closed, budget spent, launch): close any
+        // open browser tab still showing them, so an already-loaded page can't be kept reading.
+        let newlyBlocked = blockedNow.subtracting(previousBlocked ?? [])
+        if !newlyBlocked.isEmpty {
+            TabCloser.closeTabs(blockedDomains: Set(newlyBlocked.map(\.domain)))
         }
 
         let map = Dictionary(uniqueKeysWithValues: rules.map { ($0.id, usage.usage(rule: $0.id)) })

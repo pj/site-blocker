@@ -3,7 +3,7 @@ import Foundation
 /// Tracks per-rule viewing time spent today, bucketed by local day so each rule's daily budget
 /// resets naturally at local midnight. The app records time against a rule while that rule's sites
 /// are unlocked and viewable; the engine compares it to the rule's `dailyLimit`.
-public struct DailyUsage: Codable, Sendable {
+public struct DailyUsage: Codable, Sendable, Equatable {
     /// Keyed by "<ruleID>|<Y-M-D>".
     private var seconds: [String: TimeInterval]
     public var calendar: Calendar
@@ -40,5 +40,13 @@ public struct DailyUsage: Codable, Sendable {
     public mutating func pruneDays(before date: Date = Date()) {
         let today = "|\(dayKey(for: date))"
         seconds = seconds.filter { $0.key.hasSuffix(today) }
+    }
+
+    /// Merge another store in by taking the larger value for each (rule, day) bucket. Used when
+    /// reconciling with iCloud: viewing time already spent on any device is never given back.
+    public mutating func mergeTakingMax(_ other: DailyUsage) {
+        for (key, value) in other.seconds {
+            seconds[key] = Swift.max(seconds[key] ?? 0, value)
+        }
     }
 }

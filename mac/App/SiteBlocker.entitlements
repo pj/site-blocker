@@ -20,6 +20,14 @@
     <array>
         <string>content-filter-provider-systemextension</string>
     </array>
+    <!-- iCloud key-value store, for syncing rules + usage across devices (the profile grants the
+         wildcard YF7LH93MG3.*; this concrete id is covered by it). -->
+    <key>com.apple.developer.ubiquity-kvstore-identifier</key>
+    <string>$(TeamIdentifierPrefix)com.pauljohnson.siteblocker.app</string>
+    <!-- Send Apple Events (hardened runtime) so the app can close browser tabs of blocked sites.
+         Also gated at runtime by the user's Automation privacy approval, per target browser. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
     <!-- Shared container the app and the extension use to exchange the PolicySnapshot. -->
     <key>com.apple.security.application-groups</key>
     <array>

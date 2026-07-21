@@ -41,6 +41,7 @@ targets:
       properties:
         LSApplicationCategoryType: public.app-category.productivity
         NSSystemExtensionUsageDescription: SiteBlocker uses a content filter to block distracting sites according to your rules.
+        NSAppleEventsUsageDescription: SiteBlocker closes browser tabs of sites that are currently blocked.
         # Menu-bar / agent app: no Dock icon, no default window at launch.
         LSUIElement: true
         # Bump to force the OS to reload the system extension (see settings.base).

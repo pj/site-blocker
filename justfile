@@ -72,6 +72,26 @@ install: generate
     cp -R "$app" /Applications/SiteBlocker.app
     open /Applications/SiteBlocker.app
 
+# Build a distributable, notarized + stapled zip to copy to another Mac (does not touch /Applications)
+package: generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    app="{{ddata}}/Build/Products/Release/SiteBlocker.app"
+    xcodebuild -project {{project}} -scheme {{scheme}} -configuration Release \
+        -derivedDataPath {{ddata}} \
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO OTHER_CODE_SIGN_FLAGS=--timestamp \
+        build | xcbeautify
+
+    ditto -c -k --keepParent "$app" "{{ddata}}/SiteBlocker.zip"
+    xcrun notarytool submit "{{ddata}}/SiteBlocker.zip" --keychain-profile "{{notary_profile}}" --wait
+    xcrun stapler staple "$app"                    # ticket now travels inside the .app (works offline)
+    xcrun stapler validate "$app"
+
+    # Re-zip the *stapled* app for distribution (the notarize zip above predates the staple).
+    rm -f SiteBlocker-dist.zip
+    ditto -c -k --keepParent "$app" SiteBlocker-dist.zip
+    echo "→ SiteBlocker-dist.zip — copy to the other Mac, unzip, drag to /Applications"
+
 # Print resolved signing settings — handy when provisioning misbehaves
 signing-info: generate
     xcodebuild -project {{project}} -scheme {{scheme}} -showBuildSettings \
