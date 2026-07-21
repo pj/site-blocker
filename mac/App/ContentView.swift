@@ -1,33 +1,38 @@
 import SwiftUI
 import RulesEngine
 
-/// The rules management screen. Each rule is a single line: its condition logic as chips with the
-/// editing controls inline (chips AND together; want OR? add another rule — the engine already
-/// ORs rules), a sites button that opens the list editor in a popover, the enable switch, and
-/// delete. Rules have no names.
+/// The rules management screen. Each rule is a single line: three static condition controls (which
+/// days, an optional time-of-day window, an optional daily unblocked-time limit — all ANDed; want
+/// OR? add another rule, the engine ORs rules), a sites button that opens the list editor in a
+/// popover, the enable switch, and delete. Rules have no names.
 struct ContentView: View {
     @EnvironmentObject private var store: RuleStore
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 Button {
-                    Task { await store.toggleBlocking() }
+                    Task { await store.toggleLock() }
                 } label: {
-                    Label(store.blockingEnabled ? "End Block" : "Start Block",
-                          systemImage: store.blockingEnabled ? "hand.raised.slash.fill"
-                                                             : "hand.raised.fill")
+                    Label(store.isUnlocked ? "Lock" : "Unlock",
+                          systemImage: store.isUnlocked ? "lock.open.fill" : "lock.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(store.blockingEnabled ? .red : .green)
-                .help(store.blockingEnabled ? "End the block (requires authentication)"
-                                            : "Start blocking")
+                .tint(store.isUnlocked ? .green : .red)
+                .disabled(!store.isUnlocked && !store.canUnlock)
+                .help(store.isUnlocked ? "Lock now"
+                                       : (store.canUnlock ? "Unlock the allowed sites (Touch ID)"
+                                                          : "Nothing is allowed right now"))
 
-                Text("Unblocked today: \(Self.duration(store.unblockedTimeToday))")
+                Text(statusText)
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
                 Spacer()
+
+                Text("Viewed today: \(Self.duration(store.totalUsageToday))")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
             .padding(8)
             Divider()
@@ -57,8 +62,13 @@ struct ContentView: View {
         .frame(minWidth: 880, minHeight: 380)
     }
 
+    private var statusText: String {
+        if store.isUnlocked { return "Unlocked" }
+        return store.canUnlock ? "Locked — unlock available" : "Locked — no allowance active now"
+    }
+
     private func addRule() {
-        store.add(Rule(name: "", targets: [], condition: .always))
+        store.add(Rule())
     }
 
     private static func duration(_ seconds: TimeInterval) -> String {
@@ -77,17 +87,17 @@ private struct RuleRow: View {
     @EnvironmentObject private var store: RuleStore
     let rule: Rule
 
-    @State private var chips: [Chip]
+    @State private var schedule: RuleSchedule
     @State private var showSites = false
 
     init(rule: Rule) {
         self.rule = rule
-        // Legacy OR conditions flatten into one AND group; the UI no longer builds ORs.
-        _chips = State(initialValue: ChipGroup.decompose(rule.condition).flatMap(\.chips))
+        _schedule = State(initialValue: RuleSchedule(condition: rule.condition,
+                                                     dailyLimit: rule.dailyLimit))
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .center, spacing: 14) {
             Button { Task { await store.deleteAuthenticated(rule) } } label: {
                 Image(systemName: "trash")
             }
@@ -104,58 +114,18 @@ private struct RuleRow: View {
 
             sitesButton
 
-            logicLine
+            Divider().frame(height: 34)
 
-            Spacer(minLength: 12)
+            DaysControl(days: $schedule.days)
+            TimeControl(enabled: $schedule.timeEnabled, window: $schedule.window)
+            QuotaControl(enabled: $schedule.quotaEnabled, minutes: $schedule.quotaMinutes, rule: rule)
+
+            Spacer(minLength: 8)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .onChange(of: chips) { commit() }
+        .onChange(of: schedule) { commit() }
     }
-
-    // MARK: Logic line
-
-    private var logicLine: some View {
-        HStack(spacing: 6) {
-            if chips.isEmpty {
-                Text("Always")
-                    .italic()
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.4)))
-            }
-
-            ForEach($chips) { $chip in
-                ChipView(chip: $chip, onRemove: { chips.removeAll { $0.id == chip.id } })
-            }
-
-            let missing = missingKinds()
-            if !missing.isEmpty {
-                Menu {
-                    ForEach(missing, id: \.self) { kind in
-                        Button(kind.addLabel) {
-                            chips.append(Chip(atom: kind.defaultAtom))
-                        }
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .foregroundStyle(.secondary)
-                .help("AND another condition")
-            }
-        }
-    }
-
-    private func missingKinds() -> [AtomKind] {
-        let present = Set(chips.map(\.atom.kind))
-        return AtomKind.allCases.filter { !present.contains($0) }
-    }
-
-    // MARK: Sites
 
     private var sitesButton: some View {
         Button {
@@ -172,131 +142,113 @@ private struct RuleRow: View {
         .help("Edit blocked sites")
     }
 
-    // MARK: Commit
-
     private func commit() {
         var updated = rule
-        updated.condition = ChipGroup.compose([ChipGroup(chips: chips)])
+        updated.condition = schedule.condition
+        updated.dailyLimit = schedule.dailyLimit
         store.update(updated)
     }
 }
 
-// MARK: - Chips (controls live inline, inside the chip)
+// MARK: - Static condition controls
 
-private struct ChipView: View {
-    @EnvironmentObject private var store: RuleStore
-    @Binding var chip: Chip
-    let onRemove: () -> Void
+/// A control group with a small caption above its control, so every rule shows the same columns.
+private struct LabeledControl<Control: View>: View {
+    let title: String
+    @ViewBuilder var control: Control
 
     var body: some View {
-        HStack(spacing: 6) {
-            switch chip.atom {
-            case .days: DaysChipControls(chip: $chip)
-            case .time: TimeChipControls(chip: $chip)
-            case .quota: QuotaChipControls(chip: $chip)
-            }
-
-            Button(action: onRemove) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Remove condition")
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            control
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(quotaExhausted ? Color.red.opacity(0.15)
-                                                  : Color.secondary.opacity(0.10)))
-        .overlay(Capsule().strokeBorder(quotaExhausted ? Color.red.opacity(0.6)
-                                                       : Color.secondary.opacity(0.25)))
-    }
-
-    /// A usage chip goes red once today's allowance is spent.
-    private var quotaExhausted: Bool {
-        if case .quota(let limit) = chip.atom { return store.unblockedTimeToday >= limit }
-        return false
     }
 }
 
-/// Seven letter toggles, like Screen Time's day picker.
-private struct DaysChipControls: View {
-    @Binding var chip: Chip
+/// Seven letter toggles, like Screen Time's day picker. All selected = every day.
+private struct DaysControl: View {
+    @Binding var days: Set<Weekday>
 
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(Weekday.allCases, id: \.self) { day in
-                let on = isOn(day)
-                Button(day.letter) { toggle(day) }
-                    .buttonStyle(.plain)
-                    .font(.caption2.weight(.semibold))
-                    .frame(width: 20, height: 20)
-                    .background(Circle().fill(on ? Color.accentColor
-                                                 : Color.secondary.opacity(0.15)))
-                    .foregroundStyle(on ? Color.white : Color.secondary)
-                    .help(day.shortLabel)
+        LabeledControl(title: "Days") {
+            HStack(spacing: 3) {
+                ForEach(Weekday.allCases, id: \.self) { day in
+                    let on = days.contains(day)
+                    Button(day.letter) { toggle(day) }
+                        .buttonStyle(.plain)
+                        .font(.caption2.weight(.semibold))
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(on ? Color.accentColor
+                                                     : Color.secondary.opacity(0.15)))
+                        .foregroundStyle(on ? Color.white : Color.secondary)
+                        .help(day.shortLabel)
+                }
             }
         }
-    }
-
-    private func isOn(_ day: Weekday) -> Bool {
-        if case .days(let days) = chip.atom { return days.contains(day) }
-        return false
     }
 
     private func toggle(_ day: Weekday) {
-        guard case .days(var days) = chip.atom else { return }
         if days.contains(day) { days.remove(day) } else { days.insert(day) }
-        chip.atom = .days(days)
     }
 }
 
-private struct TimeChipControls: View {
-    @Binding var chip: Chip
+/// A checkbox that gates an optional time-of-day window; the pickers dim when it's off.
+private struct TimeControl: View {
+    @Binding var enabled: Bool
+    @Binding var window: TimeWindow
 
     var body: some View {
-        HStack(spacing: 3) {
-            DatePicker("", selection: minutesBinding(\.startMinutes),
-                       displayedComponents: .hourAndMinute)
-            Text("–").foregroundStyle(.secondary)
-            DatePicker("", selection: minutesBinding(\.endMinutes),
-                       displayedComponents: .hourAndMinute)
+        VStack(alignment: .leading, spacing: 3) {
+            Toggle(isOn: $enabled) { Text("Time of day").font(.caption2) }
+                .toggleStyle(.checkbox)
+            HStack(spacing: 3) {
+                DatePicker("", selection: minutesBinding(\.startMinutes),
+                           displayedComponents: .hourAndMinute)
+                Text("–").foregroundStyle(.secondary)
+                DatePicker("", selection: minutesBinding(\.endMinutes),
+                           displayedComponents: .hourAndMinute)
+            }
+            .labelsHidden()
+            .fixedSize()
+            .disabled(!enabled)
+            .opacity(enabled ? 1 : 0.4)
         }
-        .labelsHidden()
-        .fixedSize()
     }
 
     /// Bridges minutes-since-midnight to the Date a `DatePicker(.hourAndMinute)` wants.
     private func minutesBinding(_ keyPath: WritableKeyPath<TimeWindow, Int>) -> Binding<Date> {
         Binding {
-            guard case .time(let window) = chip.atom else { return Date() }
-            return Calendar.current.startOfDay(for: Date())
+            Calendar.current.startOfDay(for: Date())
                 .addingTimeInterval(TimeInterval(window[keyPath: keyPath] * 60))
         } set: { date in
-            guard case .time(var window) = chip.atom else { return }
             let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
             window[keyPath: keyPath] = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
-            chip.atom = .time(window)
         }
     }
 }
 
-private struct QuotaChipControls: View {
-    @Binding var chip: Chip
+/// A checkbox that gates an optional daily budget of viewing time; goes red once spent.
+private struct QuotaControl: View {
+    @EnvironmentObject private var store: RuleStore
+    @Binding var enabled: Bool
+    @Binding var minutes: Int
+    let rule: Rule
 
     var body: some View {
-        Stepper("\(minutes) min/day", value: minutesBinding, in: 5...240, step: 5)
-            .font(.callout)
-            .fixedSize()
-            .help("Daily allowance of unblocked time — counts down while the block is off; at zero these sites re-block even with the block off")
+        VStack(alignment: .leading, spacing: 3) {
+            Toggle(isOn: $enabled) { Text("Daily limit").font(.caption2) }
+                .toggleStyle(.checkbox)
+            Stepper("\(minutes) min/day", value: $minutes, in: 5...240, step: 5)
+                .font(.callout)
+                .fixedSize()
+                .disabled(!enabled)
+                .opacity(enabled ? 1 : 0.4)
+                .foregroundStyle(exhausted ? Color.red : Color.primary)
+                .help("Daily budget of viewing time — drains while unlocked; at zero these sites re-block for the rest of the day")
+        }
     }
 
-    private var minutes: Int {
-        if case .quota(let limit) = chip.atom { return Int(limit / 60) }
-        return 30
-    }
-
-    private var minutesBinding: Binding<Int> {
-        Binding { minutes } set: { chip.atom = .quota(TimeInterval($0 * 60)) }
+    private var exhausted: Bool {
+        enabled && store.usageToday(for: rule) >= TimeInterval(minutes * 60)
     }
 }

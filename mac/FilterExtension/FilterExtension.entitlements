@@ -12,5 +12,12 @@
     <array>
         <string>group.com.pauljohnson.siteblocker</string>
     </array>
+    <!-- The extension runs sandboxed as root, so neither the App Group container (per-user, resolves
+         to /var/root) nor arbitrary paths are readable. This exception lets it read the snapshot the
+         user-side app writes to a fixed shared location. Allowed for Developer ID distribution. -->
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+    <array>
+        <string>/Users/Shared/SiteBlocker/</string>
+    </array>
 </dict>
 </plist>

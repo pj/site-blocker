@@ -1,36 +1,44 @@
 import Foundation
 
-/// Tracks how much "unblocked" (distraction) time has been spent, bucketed by local day.
-/// The enforcement layer (or a timer in the app) calls `record(_:at:)` as unblocked time
-/// elapses; `afterUnblockedTime` conditions read `unblockedTime(on:)`.
-///
-/// Bucketing by day means the daily allowance resets naturally at local midnight without any
-/// explicit reset step.
+/// Tracks per-rule viewing time spent today, bucketed by local day so each rule's daily budget
+/// resets naturally at local midnight. The app records time against a rule while that rule's sites
+/// are unlocked and viewable; the engine compares it to the rule's `dailyLimit`.
 public struct DailyUsage: Codable, Sendable {
-    private var secondsByDay: [String: TimeInterval]
+    /// Keyed by "<ruleID>|<Y-M-D>".
+    private var seconds: [String: TimeInterval]
     public var calendar: Calendar
 
     public init(calendar: Calendar = .current) {
-        self.secondsByDay = [:]
+        self.seconds = [:]
         self.calendar = calendar
     }
 
-    private func key(for date: Date) -> String {
+    private func dayKey(for date: Date) -> String {
         let c = calendar.dateComponents([.year, .month, .day], from: date)
         return "\(c.year ?? 0)-\(c.month ?? 0)-\(c.day ?? 0)"
     }
 
-    public mutating func record(_ seconds: TimeInterval, at date: Date = Date()) {
-        secondsByDay[key(for: date), default: 0] += seconds
+    private func key(rule: UUID, date: Date) -> String {
+        "\(rule.uuidString)|\(dayKey(for: date))"
     }
 
-    public func unblockedTime(on date: Date = Date()) -> TimeInterval {
-        secondsByDay[key(for: date)] ?? 0
+    public mutating func record(_ seconds: TimeInterval, rule: UUID, at date: Date = Date()) {
+        self.seconds[key(rule: rule, date: date), default: 0] += seconds
     }
 
-    /// Drop buckets older than `date`'s day so the store doesn't grow without bound.
+    public func usage(rule: UUID, on date: Date = Date()) -> TimeInterval {
+        seconds[key(rule: rule, date: date)] ?? 0
+    }
+
+    /// Total viewing time across all rules today — for the summary in the window header.
+    public func totalUsage(on date: Date = Date()) -> TimeInterval {
+        let suffix = "|\(dayKey(for: date))"
+        return seconds.filter { $0.key.hasSuffix(suffix) }.values.reduce(0, +)
+    }
+
+    /// Drop buckets from days before `date` so the store doesn't grow without bound.
     public mutating func pruneDays(before date: Date = Date()) {
-        let cutoff = key(for: date)
-        secondsByDay = secondsByDay.filter { $0.key >= cutoff }
+        let today = "|\(dayKey(for: date))"
+        seconds = seconds.filter { $0.key.hasSuffix(today) }
     }
 }

@@ -21,6 +21,26 @@ public indirect enum Condition: Codable, Hashable, Sendable {
     case allOf([Condition])
     case anyOf([Condition])
 
+    /// Split a legacy condition into its day/time *window* and any daily budget that was encoded
+    /// as an `afterUnblockedTime` atom. Used to migrate the old "block after N minutes" rules to
+    /// the allow model, where the budget is a separate `Rule.dailyLimit`.
+    public func splittingDailyLimit() -> (window: Condition, limit: TimeInterval?) {
+        switch self {
+        case .afterUnblockedTime(let limit):
+            return (.always, limit)
+        case .allOf(let list):
+            var limit: TimeInterval?
+            var rest: [Condition] = []
+            for condition in list {
+                if case .afterUnblockedTime(let l) = condition { limit = l } else { rest.append(condition) }
+            }
+            let window: Condition = rest.isEmpty ? .always : (rest.count == 1 ? rest[0] : .allOf(rest))
+            return (window, limit)
+        default:
+            return (self, nil)
+        }
+    }
+
     public func evaluate(in context: RuleContext) -> Bool {
         switch self {
         case .always:

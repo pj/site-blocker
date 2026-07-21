@@ -17,6 +17,10 @@ settings:
     # Interpolated from the environment at `xcodegen generate` time (justfile loads .env).
     DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
     CODE_SIGN_STYLE: Automatic
+    # Bump on any change that must reload the *system extension*: the OS only swaps in a new
+    # extension binary when its version increases. App + extension stay in lockstep.
+    MARKETING_VERSION: "1.5"
+    CURRENT_PROJECT_VERSION: "6"
 
 targets:
   SiteBlocker:
@@ -39,6 +43,9 @@ targets:
         NSSystemExtensionUsageDescription: SiteBlocker uses a content filter to block distracting sites according to your rules.
         # Menu-bar / agent app: no Dock icon, no default window at launch.
         LSUIElement: true
+        # Bump to force the OS to reload the system extension (see settings.base).
+        CFBundleShortVersionString: "1.5"
+        CFBundleVersion: "6"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.app
@@ -67,6 +74,9 @@ targets:
       path: FilterExtension/Info.plist
       properties:
         CFBundlePackageType: SYSX
+        # The extension's version must match the app's and increase to force a reload.
+        CFBundleShortVersionString: "1.5"
+        CFBundleVersion: "6"
         # macOS 26 (Tahoe) requires network_extension-category system extensions to carry this in
         # their *own* Info.plist (not just the host app's), or activation fails.
         NSSystemExtensionUsageDescription: SiteBlocker uses a content filter to block distracting sites according to your rules.

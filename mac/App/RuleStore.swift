@@ -3,28 +3,34 @@ import OSLog
 import RulesEngine
 
 /// Unified-log logger; view with `just logs` (stream) or
-/// `log show --last 1h --predicate 'subsystem == "com.pauljohnson.siteblocker"'`.
+/// `/usr/bin/log show --last 1h --predicate 'subsystem == "com.pauljohnson.siteblocker"'`.
 let sourceLog = Logger(subsystem: "com.pauljohnson.siteblocker", category: "sources")
 
-/// The app-side coordinator: owns the rules + usage, recomputes what's blocked, and pushes to the
-/// enforcer. Pure evaluation lives in `BlockEngine`; this type is just the wiring (clock, timer,
-/// persistence, enforcement hand-off) that a pure value type shouldn't hold.
+/// The app-side coordinator for the allow model. Sites named by rules are blocked by default; the
+/// user *unlocks* (Touch ID) to view them, but only while some rule's day/time window is open and
+/// its daily budget isn't spent. While unlocked, each allowed rule's budget drains in wall-clock;
+/// when it runs out (or its window closes) that rule's sites re-block. Pure evaluation lives in
+/// `BlockEngine`; this type is the wiring (clock, timer, persistence, enforcement hand-off).
 @MainActor
 final class RuleStore: ObservableObject {
     @Published var rules: [Rule] {
         didSet { persistence.save(rules: rules, usage: usage); refresh() }
     }
 
-    /// Host patterns actively blocked *right now* (real clock). Drives the status view.
+    /// Host patterns actively blocked *right now*. Drives the status view.
     @Published private(set) var blockedNow: Set<HostPattern> = []
 
-    /// Instant used by the "what would be blocked at…" preview panel.
-    @Published var previewDate: Date = Date()
+    /// Whether the sites are currently unlocked (viewable). Locked by default; **not** persisted, so
+    /// every launch starts locked/blocked — the safe default.
+    @Published private(set) var isUnlocked = false
 
-    /// Master switch. When off, nothing is blocked regardless of rules. Turning it off is guarded by
-    /// authentication (see `toggleBlocking`). Deliberately **not** persisted — every launch starts
-    /// enabled, so quitting/relaunching always re-enables blocking.
-    @Published private(set) var blockingEnabled = true
+    /// Whether at least one rule is eligible to unlock right now (window open + budget left). Drives
+    /// whether the Unlock control is offered.
+    @Published private(set) var canUnlock = false
+
+    /// Per-rule viewing time used today, and the total — for the "time left" readouts.
+    @Published private(set) var usageByRule: [UUID: TimeInterval] = [:]
+    @Published private(set) var totalUsageToday: TimeInterval = 0
 
     private var usage: DailyUsage
     private let enforcer: Enforcer
@@ -32,9 +38,8 @@ final class RuleStore: ObservableObject {
     private var timer: Timer?
     private var hotKey: GlobalHotKey?
 
-    /// Set while the master block is off: the moment up to which unblocked time has been accrued.
-    /// The daily quota counts wall-clock time with blocking disabled, not time spent on any site.
-    private var unblockedSince: Date?
+    /// Set while unlocked: the moment up to which viewing time has been charged to the allowed rules.
+    private var unlockedSince: Date?
 
     /// Health of each rule's external target source, for the sites popover.
     struct SourceStatus: Equatable {
@@ -60,53 +65,68 @@ final class RuleStore: ObservableObject {
         refresh()
     }
 
-    /// Today's accrued unblocked time. Published so the counter next to the block button and the
-    /// exhausted-quota chip tint update live as the allowance drains.
-    @Published private(set) var unblockedTimeToday: TimeInterval = 0
+    /// Viewing time used today for a rule, and how much of its budget remains.
+    func usageToday(for rule: Rule) -> TimeInterval { usageByRule[rule.id] ?? 0 }
+
+    func remainingBudget(for rule: Rule) -> TimeInterval? {
+        guard let limit = rule.dailyLimit else { return nil }
+        return max(0, limit - usageToday(for: rule))
+    }
 
     private func liveContext() -> RuleContext {
-        RuleContext(now: Date(), calendar: .current, unblockedTimeToday: usage.unblockedTime())
+        RuleContext(now: Date(), calendar: .current)
     }
+
+    private func usageLookup(_ id: UUID) -> TimeInterval { usage.usage(rule: id) }
 
     /// Recompute the live blocked set, hand it to the enforcer, and refresh the shared snapshot.
-    ///
-    /// Master on: all rules apply, with quota atoms treated as satisfied (the allowance only
-    /// governs unblocked time). Master off: only quota rules survive, evaluated against the real
-    /// accrued time — so when the day's allowance hits zero they forcibly re-block their sites.
+    /// Charges elapsed viewing time to the allowed rules first, so budgets that run out this tick
+    /// re-block immediately.
     func refresh() {
-        accrueUnblockedTime()
-        if unblockedTimeToday != usage.unblockedTime() {
-            unblockedTimeToday = usage.unblockedTime()
+        drainViewingTime()
+
+        let context = liveContext()
+        let engine = BlockEngine(rules: rules)
+        let eligible = engine.eligibleRules(in: context, usage: usageLookup)
+
+        canUnlock = !eligible.isEmpty
+        // Auto-lock once nothing is eligible (all windows closed / budgets spent).
+        if isUnlocked && eligible.isEmpty {
+            isUnlocked = false
+            unlockedSince = nil
         }
-        let effectiveRules: [Rule]
-        if blockingEnabled {
-            effectiveRules = rules.map { rule in
-                var adjusted = rule
-                adjusted.condition = rule.condition.quotaSatisfied
-                return adjusted
-            }
-        } else {
-            effectiveRules = rules.filter { $0.condition.containsQuota }
-        }
-        let engine = BlockEngine(rules: effectiveRules)
-        blockedNow = engine.blockedPatterns(in: liveContext())
+
+        blockedNow = engine.blockedPatterns(unlocked: isUnlocked, in: context, usage: usageLookup)
         enforcer.apply(blockedPatterns: blockedNow)
-        persistence.writeSnapshot(
-            PolicySnapshot(rules: effectiveRules, unblockedTimeToday: usage.unblockedTime()))
+        persistence.writeSnapshot(PolicySnapshot(blockedPatterns: blockedNow))
+
+        let map = Dictionary(uniqueKeysWithValues: rules.map { ($0.id, usage.usage(rule: $0.id)) })
+        if usageByRule != map { usageByRule = map }
+        let total = usage.totalUsage()
+        if totalUsageToday != total { totalUsageToday = total }
     }
 
-    /// Which rules would be active at `date`, for the preview panel. Uses today's usage total.
-    func activeRules(at date: Date) -> [Rule] {
-        let context = RuleContext(now: date, calendar: .current,
-                                  unblockedTimeToday: usage.unblockedTime())
-        return rules.filter { $0.isActive(in: context) }
+    /// Charge the time since the last tick to every rule that's currently allowed (unlocked, window
+    /// open, budget left). No-op while locked.
+    private func drainViewingTime() {
+        guard isUnlocked, let since = unlockedSince else { return }
+        let now = Date()
+        let elapsed = now.timeIntervalSince(since)
+        unlockedSince = now
+        guard elapsed > 0 else { return }
+        let engine = BlockEngine(rules: rules)
+        let context = RuleContext(now: now, calendar: .current)
+        var changed = false
+        for rule in engine.eligibleRules(in: context, usage: usageLookup) where rule.dailyLimit != nil {
+            usage.record(elapsed, rule: rule.id, at: now)
+            changed = true
+        }
+        if changed { persistence.save(rules: rules, usage: usage) }
     }
 
     // MARK: Mutations
 
     func add(_ rule: Rule) { rules.append(rule) }
-
-    func delete(at offsets: IndexSet) { rules.remove(atOffsets: offsets) }
 
     func delete(_ rule: Rule) { rules.removeAll { $0.id == rule.id } }
 
@@ -120,53 +140,45 @@ final class RuleStore: ObservableObject {
         rules[idx].isEnabled = isEnabled
     }
 
-    /// Flip a rule's enabled flag behind Touch ID / password. Both directions are gated so the
-    /// rules screen stays deliberate rather than a free bypass.
+    /// Flip a rule's enabled flag behind Touch ID. Both directions are gated so the rules screen
+    /// stays deliberate rather than a free bypass.
     func toggleRuleAuthenticated(_ rule: Rule) async {
         let verb = rule.isEnabled ? "disable" : "enable"
-        guard await Authentication.confirm(reason: "\(verb) a blocking rule") else { return }
+        guard await Authentication.confirm(reason: "\(verb) an allow rule") else { return }
         setEnabled(rule, isEnabled: !rule.isEnabled)
     }
 
-    /// Delete a rule behind Touch ID / password — otherwise deleting would be an unauthenticated
-    /// way around the gated disable.
+    /// Delete a rule behind Touch ID — otherwise deleting would be an unauthenticated way around
+    /// the gated disable.
     func deleteAuthenticated(_ rule: Rule) async {
-        guard await Authentication.confirm(reason: "delete a blocking rule") else { return }
+        guard await Authentication.confirm(reason: "delete an allow rule") else { return }
         delete(rule)
     }
 
-    // MARK: Master switch
+    // MARK: Lock / unlock
 
-    func setBlockingEnabled(_ enabled: Bool) {
-        if enabled {
-            accrueUnblockedTime()   // bank the final unblocked chunk while still off
-            unblockedSince = nil
-        } else {
-            unblockedSince = Date()
-        }
-        blockingEnabled = enabled
+    /// Toggle the lock. Unlocking (making sites viewable) requires Touch ID and that some rule is
+    /// eligible right now; locking is immediate.
+    func toggleLock() async {
+        if isUnlocked { lock() } else { await unlock() }
+    }
+
+    /// Unlock the currently-allowed sites. Refused (no-op) when nothing is eligible.
+    func unlock() async {
+        let context = liveContext()
+        let engine = BlockEngine(rules: rules)
+        guard !engine.eligibleRules(in: context, usage: usageLookup).isEmpty else { return }
+        guard await Authentication.confirm(reason: "unlock the blocked sites") else { return }
+        isUnlocked = true
+        unlockedSince = Date()
         refresh()
     }
 
-    /// Add the wall-clock time since the last accrual to today's usage. Runs on every refresh
-    /// tick while the master block is off; no-op while it's on.
-    private func accrueUnblockedTime() {
-        guard !blockingEnabled, let since = unblockedSince else { return }
-        let now = Date()
-        usage.record(now.timeIntervalSince(since))
-        unblockedSince = now
-        persistence.save(rules: rules, usage: usage)
-    }
-
-    /// Toggle the master switch. Turning blocking **off** requires authentication (Touch ID /
-    /// password) as a barrier; turning it back on is immediate.
-    func toggleBlocking() async {
-        if blockingEnabled {
-            guard await Authentication.confirm(reason: "end the site block") else { return }
-            setBlockingEnabled(false)
-        } else {
-            setBlockingEnabled(true)
-        }
+    func lock() {
+        drainViewingTime()
+        isUnlocked = false
+        unlockedSince = nil
+        refresh()
     }
 
     // MARK: Target sources
@@ -288,24 +300,14 @@ final class RuleStore: ObservableObject {
 
     private func registerHotKey() {
         hotKey = GlobalHotKey.blockingToggle { [weak self] in
-            Task { @MainActor in await self?.toggleBlocking() }
+            Task { @MainActor in await self?.toggleLock() }
         }
     }
 
-    /// Debug affordance: without the real extension there's no live flow telemetry, so let the UI
-    /// inject "distraction time" to exercise `afterUnblockedTime` rules. In production this number
-    /// comes from the extension reporting time spent on allowed target hosts.
-    func simulateUnblockedTime(minutes: Double) {
-        usage.record(minutes * 60)
-        persistence.save(rules: rules, usage: usage)
-        refresh()
-    }
-
     private func startTimer() {
-        // Re-evaluate periodically so time-of-day transitions and the unblocked-time countdown
-        // take effect without user action. 5s keeps the forcible re-block prompt when a quota
-        // runs out; evaluation is trivial and the snapshot is tiny. Source resolution piggybacks
-        // on the same tick (files re-read only when their mtime changes).
+        // Re-evaluate periodically so day/time windows, budget drain, and auto-lock take effect
+        // without user action. 5s is responsive enough for a re-block; evaluation is trivial and
+        // the snapshot is tiny. Source resolution piggybacks (files re-read only when mtime changes).
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.resolveSources()

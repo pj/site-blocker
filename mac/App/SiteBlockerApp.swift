@@ -58,8 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (which handles the global case) intercepts the combo before it reaches the menu, so it
         // won't fire twice.
         menu = NSMenu()
+        menu.autoenablesItems = false   // we drive the Unlock item's enabled state ourselves
 
-        toggleItem = NSMenuItem(title: "", action: #selector(toggleBlocking), keyEquivalent: "b")
+        toggleItem = NSMenuItem(title: "", action: #selector(toggleLock), keyEquivalent: "b")
         toggleItem.keyEquivalentModifierMask = [.control, .option, .command]
         toggleItem.target = self
         menu.addItem(toggleItem)
@@ -84,8 +85,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func toggleBlocking() {
-        Task { await store.toggleBlocking() }
+    @objc private func toggleLock() {
+        Task { await store.toggleLock() }
     }
 
     @objc private func showManagementWindow() {
@@ -104,21 +105,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateIcon() {
-        let symbol = store.blockingEnabled ? "hand.raised.slash.fill" : "hand.raised.fill"
-        let color: NSColor = store.blockingEnabled ? .systemRed : .systemGreen
+        // Red padlock while locked (sites blocked), green open padlock while unlocked.
+        let symbol = store.isUnlocked ? "lock.open.fill" : "lock.fill"
+        let color: NSColor = store.isUnlocked ? .systemGreen : .systemRed
         statusItem.button?.image = .tintedSymbol(symbol, color: color)
     }
 
     private func updateToggleItem() {
-        // Same red/green metaphor as the old prominent button: red while blocking is on.
-        if store.blockingEnabled {
-            toggleItem.title = "End Block"
-            toggleItem.image = .tintedSymbol("hand.raised.slash.fill", color: .systemRed,
-                                             pointSize: 13)
+        if store.isUnlocked {
+            toggleItem.title = "Lock"
+            toggleItem.image = .tintedSymbol("lock.open.fill", color: .systemGreen, pointSize: 13)
+            toggleItem.isEnabled = true
         } else {
-            toggleItem.title = "Start Block"
-            toggleItem.image = .tintedSymbol("hand.raised.fill", color: .systemGreen,
-                                             pointSize: 13)
+            toggleItem.title = "Unlock"
+            toggleItem.image = .tintedSymbol("lock.fill", color: .systemRed, pointSize: 13)
+            // Unlock is only possible when some rule's window is open with budget left.
+            toggleItem.isEnabled = store.canUnlock
         }
     }
 }

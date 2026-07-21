@@ -79,11 +79,11 @@ signing-info: generate
 
 # Stream the app's live logs (target-source reads/fetches and their errors)
 logs:
-    log stream --level info --predicate 'subsystem == "com.pauljohnson.siteblocker"'
+    /usr/bin/log stream --level info --predicate 'subsystem == "com.pauljohnson.siteblocker"'
 
 # Show the app's logs from the last hour
 logs-recent:
-    log show --last 1h --info --predicate 'subsystem == "com.pauljohnson.siteblocker"'
+    /usr/bin/log show --last 1h --info --predicate 'subsystem == "com.pauljohnson.siteblocker"'
 
 # Show SiteBlocker's system-extension activation status
 sysext-status:

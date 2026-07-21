@@ -28,12 +28,8 @@ struct PersistenceController {
     private var rulesURL: URL { supportDir.appendingPathComponent("rules.json") }
     private var usageURL: URL { supportDir.appendingPathComponent("usage.json") }
 
-    /// Shared with the extension. Falls back to Application Support when the App Group container
-    /// isn't available (e.g. unsigned local runs before provisioning).
-    var snapshotURL: URL {
-        let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroupID)
-        return (group ?? supportDir).appendingPathComponent("policy.json")
-    }
+    /// Shared with the (root) extension via a fixed `/Users/Shared` path — see `PolicySnapshot.fileURL`.
+    var snapshotURL: URL { PolicySnapshot.fileURL }
 
     func load() -> Loaded {
         let rules = (try? Data(contentsOf: rulesURL))
@@ -49,23 +45,24 @@ struct PersistenceController {
     }
 
     func writeSnapshot(_ snapshot: PolicySnapshot) {
+        let dir = snapshotURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: snapshotURL) }
     }
 
-    /// Seed content so a fresh install demonstrates each condition kind.
+    /// Seed content so a fresh install shows the allow model: sites blocked by default, viewable
+    /// only inside the rule's window and up to its daily budget.
     static let starterRules: [Rule] = [
-        Rule(name: "Socials during work hours",
-             targets: ["twitter.com", "reddit.com", "instagram.com"],
+        Rule(name: "Socials — weekday lunch",
+             targets: ["twitter.com", "x.com", "reddit.com", "instagram.com"],
              condition: .allOf([
                  .onDaysOfWeek([.monday, .tuesday, .wednesday, .thursday, .friday]),
-                 .duringTimeOfDay(TimeWindow(startHour: 9, endHour: 17)),
-             ])),
-        Rule(name: "YouTube after 30 min",
+                 .duringTimeOfDay(TimeWindow(startHour: 12, endHour: 13)),
+             ]),
+             dailyLimit: 30 * 60),
+        Rule(name: "YouTube — 20 min/day",
              targets: ["youtube.com"],
-             condition: .afterUnblockedTime(30 * 60)),
-        Rule(name: "News — always",
-             isEnabled: false,
-             targets: ["news.ycombinator.com"],
-             condition: .always),
+             condition: .always,
+             dailyLimit: 20 * 60),
     ]
 }

@@ -1,21 +1,24 @@
 import NetworkExtension
 import Network
+import OSLog
 import RulesEngine
 
-/// The content-filter system extension. Runs in its own sandboxed process, sees every network
-/// flow, and returns an allow/drop verdict per flow.
+private let filterLog = Logger(subsystem: "com.pauljohnson.siteblocker", category: "filter")
+
+/// The content-filter system extension. Runs sandboxed (as root), sees every network flow, and
+/// returns an allow/drop verdict.
 ///
-/// It holds no rules logic of its own: it loads the `PolicySnapshot` the app wrote to the shared
-/// App Group container and asks the shared `BlockEngine` to decide. That keeps enforcement and the
-/// app perfectly in sync and means all the interesting logic stays unit-tested in `RulesEngine`.
+/// Rules logic stays app-side: the app resolves the current blocked set and writes it to a fixed
+/// shared file (`PolicySnapshot.fileURL`); the extension is a thin check. Because a socket flow's
+/// endpoint is the *resolved IP*, not a hostname, we can't match domains at `handleNewFlow` time.
+/// Instead we peek the flow's outbound TLS ClientHello and read the SNI server name — the hostname
+/// the browser actually asked for — and match that.
 final class FilterDataProvider: NEFilterDataProvider {
     private var snapshot: PolicySnapshot?
 
-    /// Must match `PersistenceController.appGroupID`.
-    private static let appGroupID = "group.com.pauljohnson.siteblocker"
-
     override func startFilter(completionHandler: @escaping (Error?) -> Void) {
         reloadSnapshot()
+        filterLog.error("startFilter — snapshot has \(self.snapshot?.blockedPatterns.count ?? -1, privacy: .public) blocked patterns")
         completionHandler(nil)
     }
 
@@ -25,39 +28,83 @@ final class FilterDataProvider: NEFilterDataProvider {
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
-        // Re-read on demand so rule/quota changes take effect quickly. (Could be optimized to a
-        // file-watch + cached decode; fine as-is for a personal tool.)
-        reloadSnapshot()
-        guard let snapshot, let hostname = Self.hostname(for: flow) else {
+        // HTTPS (443): peek the outbound handshake so we can read the SNI hostname. Everything else
+        // we allow (the hostname isn't available for plain socket flows).
+        guard let socket = flow as? NEFilterSocketFlow, Self.remotePort(socket) == 443 else {
             return .allow()
         }
-        let decision = snapshot.engine.decision(forHostname: hostname, in: snapshot.context())
-        return decision.isBlocked ? .drop() : .allow()
+        return .filterDataVerdict(withFilterInbound: false, peekInboundBytes: 0,
+                                  filterOutbound: true, peekOutboundBytes: 4096)
+    }
+
+    override func handleOutboundData(from flow: NEFilterFlow,
+                                     readBytesStartOffset offset: Int,
+                                     readBytes: Data) -> NEFilterDataVerdict {
+        guard let host = Self.sniHostname(from: readBytes) else {
+            // Not a parseable ClientHello (or SNI absent) — let it through and stop inspecting.
+            return .allow()
+        }
+        reloadSnapshot()
+        let blocked = snapshot?.isBlocked(hostname: host) ?? false
+        filterLog.error("\(blocked ? "DROP" : "allow", privacy: .public) \(host, privacy: .public)")
+        return blocked ? .drop() : .allow()
     }
 
     private func reloadSnapshot() {
-        guard let container = FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: Self.appGroupID) else { return }
-        let url = container.appendingPathComponent("policy.json")
-        guard let data = try? Data(contentsOf: url) else { return }
-        snapshot = try? JSONDecoder().decode(PolicySnapshot.self, from: data)
+        // Read the fixed shared path (see `PolicySnapshot.fileURL`): this extension runs sandboxed as
+        // root, so the App Group container (per-user, /var/root) doesn't match the app's. A sandbox
+        // temporary-exception entitlement grants read access to that directory.
+        guard let data = try? Data(contentsOf: PolicySnapshot.fileURL) else {
+            filterLog.error("reloadSnapshot: cannot read \(PolicySnapshot.fileURL.path, privacy: .public)")
+            return
+        }
+        do {
+            snapshot = try JSONDecoder().decode(PolicySnapshot.self, from: data)
+        } catch {
+            filterLog.error("reloadSnapshot: decode failed \(error, privacy: .public)")
+        }
     }
 
-    /// Extract a hostname from a flow. On macOS every filtered flow is a socket flow; its
-    /// `remoteFlowEndpoint` carries the destination. `.name` is the DNS hostname when the
-    /// connection was made by name (the usual case — browsers resolve then connect), otherwise we
-    /// fall back to the IP literal. Hostname rules therefore key off name/SNI info, not reverse-DNS.
-    static func hostname(for flow: NEFilterFlow) -> String? {
-        guard let socket = flow as? NEFilterSocketFlow,
-              let endpoint = socket.remoteFlowEndpoint,
-              case let .hostPort(host, _) = endpoint else {
-            return nil
+    private static func remotePort(_ socket: NEFilterSocketFlow) -> Int? {
+        guard let endpoint = socket.remoteFlowEndpoint,
+              case let .hostPort(_, port) = endpoint else { return nil }
+        return Int(port.rawValue)
+    }
+
+    /// Parse the SNI host_name from a TLS ClientHello. Returns `nil` if `bytes` isn't a ClientHello
+    /// or carries no server_name extension. Bounds-checked throughout — the input is attacker-shaped.
+    static func sniHostname(from bytes: Data) -> String? {
+        let b = [UInt8](bytes)
+        var i = 0
+        func u8() -> Int? { guard i < b.count else { return nil }; defer { i += 1 }; return Int(b[i]) }
+        func u16() -> Int? { guard let h = u8(), let l = u8() else { return nil }; return h << 8 | l }
+
+        // TLS record header: type(0x16 handshake), version(2), length(2)
+        guard b.count >= 5, b[0] == 0x16 else { return nil }
+        i = 5
+        // Handshake header: type(0x01 ClientHello), length(3)
+        guard u8() == 0x01 else { return nil }
+        i += 3                                   // handshake length
+        i += 2                                   // client_version
+        i += 32                                  // random
+        guard let sessionLen = u8() else { return nil }
+        i += sessionLen                          // session_id
+        guard let cipherLen = u16() else { return nil }
+        i += cipherLen                           // cipher_suites
+        guard let compLen = u8() else { return nil }
+        i += compLen                             // compression_methods
+        guard u16() != nil else { return nil }   // extensions total length
+
+        while i + 4 <= b.count {
+            guard let extType = u16(), let extLen = u16() else { return nil }
+            if extType == 0x0000 {               // server_name
+                guard u16() != nil else { return nil }          // server_name_list length
+                guard u8() == 0x00 else { return nil }          // name_type host_name
+                guard let nameLen = u16(), i + nameLen <= b.count else { return nil }
+                return String(bytes: b[i..<i + nameLen], encoding: .utf8)
+            }
+            i += extLen                          // skip other extensions
         }
-        switch host {
-        case .name(let name, _): return name
-        case .ipv4(let address): return "\(address)"
-        case .ipv6(let address): return "\(address)"
-        @unknown default: return nil
-        }
+        return nil
     }
 }
