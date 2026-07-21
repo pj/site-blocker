@@ -45,6 +45,11 @@ final class RuleStore: ObservableObject {
     /// multi-megabyte) snapshot file when nothing changed between ticks.
     private var lastBlocked: Set<HostPattern>?
 
+    /// Budget-countdown notification state for the unlock session: the last whole-minute value we
+    /// posted a 5-minute update for, and whether the final 1-minute warning has fired.
+    private var lastNotifiedTotalMinutes: Int?
+    private var totalWarned = false
+
     /// Health of each rule's external target source, for the sites popover.
     struct SourceStatus: Equatable {
         var lastUpdated: Date?
@@ -129,6 +134,41 @@ final class RuleStore: ObservableObject {
             changed = true
         }
         if changed { persistence.save(rules: rules, usage: usage) }
+        notifyCountdown()
+    }
+
+    /// Viewing time left in the session: the soonest a currently-draining, budget-limited rule will
+    /// re-block. `nil` when nothing limited is draining (unlimited or no active rule).
+    private func sessionRemaining() -> TimeInterval? {
+        let engine = BlockEngine(rules: rules)
+        return engine.eligibleRules(in: liveContext(), usage: usageLookup)
+            .compactMap { rule in rule.dailyLimit.map { max(0, $0 - usage.usage(rule: rule.id)) } }
+            .min()
+    }
+
+    /// Post a single "time remaining" update every 5 minutes, then a final warning ~1 minute before
+    /// the budget runs out. Tracks the total session time, not any one site.
+    private func notifyCountdown() {
+        guard let remaining = sessionRemaining() else { return }
+        if remaining <= 60 {
+            if !totalWarned {
+                totalWarned = true
+                Notifier.notify("About 1 minute of viewing time left.", id: "budget-final", sound: true)
+            }
+            return
+        }
+        let minutes = Int((remaining / 60.0).rounded(.up))
+        if minutes % 5 == 0, lastNotifiedTotalMinutes != minutes {
+            lastNotifiedTotalMinutes = minutes
+            Notifier.notify("\(minutes) minutes of viewing time left.", id: "budget-\(minutes)")
+        }
+    }
+
+    /// Seed the countdown so notifications track *decreases* from the current level rather than
+    /// firing at unlock.
+    private func seedBudgetNotifications() {
+        totalWarned = false
+        lastNotifiedTotalMinutes = sessionRemaining().map { Int(($0 / 60.0).rounded(.up)) }
     }
 
     // MARK: Mutations
@@ -178,6 +218,7 @@ final class RuleStore: ObservableObject {
         guard await Authentication.confirm(reason: "unlock the blocked sites") else { return }
         isUnlocked = true
         unlockedSince = Date()
+        seedBudgetNotifications()
         refresh()
     }
 
@@ -185,6 +226,8 @@ final class RuleStore: ObservableObject {
         drainViewingTime()
         isUnlocked = false
         unlockedSince = nil
+        lastNotifiedTotalMinutes = nil
+        totalWarned = false
         refresh()
     }
 

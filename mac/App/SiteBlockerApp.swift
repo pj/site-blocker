@@ -49,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         enforcer.activateAndEnable()
         #endif
 
+        Notifier.requestAuthorization()   // for budget-countdown alerts while unlocked
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon()
 
