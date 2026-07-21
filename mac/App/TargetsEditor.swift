@@ -58,14 +58,19 @@ struct TargetsEditor: View {
     }
 }
 
-/// Parses domain lists in plain (one-per-line) or hosts-file format, stripping comments.
+/// Parses domain lists in plain (one-per-line) or hosts-file format. Handles the comment styles
+/// common to public blocklists (e.g. HaGeZi, AdGuard, Steven Black hosts): full-line and trailing
+/// comments introduced by `#`, `!`, or `;` are stripped, blank lines skipped, and hosts-format
+/// lines ("0.0.0.0 example.com") reduced to the domain.
 enum TargetImport {
+    private static let commentMarkers: Set<Character> = ["#", "!", ";"]
+
     static func parse(_ text: String) -> [String] {
         var out: [String] = []
         var seen = Set<String>()
         text.enumerateLines { rawLine, _ in
             var line = rawLine
-            if let comment = line.firstIndex(where: { $0 == "#" || $0 == "!" }) {
+            if let comment = line.firstIndex(where: { commentMarkers.contains($0) }) {
                 line = String(line[..<comment])
             }
             line = line.trimmingCharacters(in: .whitespaces)

@@ -14,11 +14,16 @@ private let filterLog = Logger(subsystem: "com.pauljohnson.siteblocker", categor
 /// Instead we peek the flow's outbound TLS ClientHello and read the SNI server name — the hostname
 /// the browser actually asked for — and match that.
 final class FilterDataProvider: NEFilterDataProvider {
-    private var snapshot: PolicySnapshot?
+    /// Blocked domains as a hash set for O(labels) suffix matching — a linear scan of a large
+    /// blocklist (hundreds of thousands of entries) per flow would be far too slow.
+    private var blockedDomains: Set<String> = []
+    /// Modification time of the last snapshot we decoded, so we re-read only when it changes rather
+    /// than decoding a multi-megabyte file on every flow.
+    private var snapshotMTime: Date?
 
     override func startFilter(completionHandler: @escaping (Error?) -> Void) {
-        reloadSnapshot()
-        filterLog.error("startFilter — snapshot has \(self.snapshot?.blockedPatterns.count ?? -1, privacy: .public) blocked patterns")
+        reloadSnapshotIfNeeded()
+        filterLog.error("startFilter — \(self.blockedDomains.count, privacy: .public) blocked domains")
         completionHandler(nil)
     }
 
@@ -44,25 +49,45 @@ final class FilterDataProvider: NEFilterDataProvider {
             // Not a parseable ClientHello (or SNI absent) — let it through and stop inspecting.
             return .allow()
         }
-        reloadSnapshot()
-        let blocked = snapshot?.isBlocked(hostname: host) ?? false
+        reloadSnapshotIfNeeded()
+        let blocked = isBlocked(host)
         filterLog.error("\(blocked ? "DROP" : "allow", privacy: .public) \(host, privacy: .public)")
         return blocked ? .drop() : .allow()
     }
 
-    private func reloadSnapshot() {
+    /// Blocked if the hostname, or any parent domain of it, is in the blocked set — the standard
+    /// "domain and all subdomains" rule, done as O(number of labels) hash lookups.
+    private func isBlocked(_ hostname: String) -> Bool {
+        guard !blockedDomains.isEmpty else { return false }
+        var suffix = Substring(hostname.lowercased())
+        while true {
+            if blockedDomains.contains(String(suffix)) { return true }
+            guard let dot = suffix.firstIndex(of: ".") else { return false }
+            suffix = suffix[suffix.index(after: dot)...]
+        }
+    }
+
+    private func reloadSnapshotIfNeeded() {
         // Read the fixed shared path (see `PolicySnapshot.fileURL`): this extension runs sandboxed as
         // root, so the App Group container (per-user, /var/root) doesn't match the app's. A sandbox
-        // temporary-exception entitlement grants read access to that directory.
-        guard let data = try? Data(contentsOf: PolicySnapshot.fileURL) else {
-            filterLog.error("reloadSnapshot: cannot read \(PolicySnapshot.fileURL.path, privacy: .public)")
+        // temporary-exception entitlement grants read access. Re-decode only when the file changes.
+        let path = PolicySnapshot.fileURL.path
+        // Stat via FileManager, not URL.resourceValues: the latter caches on the (shared static) URL
+        // instance and would never see the app's updates.
+        guard let mtime = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate]
+            as? Date else {
+            filterLog.error("reloadSnapshot: cannot stat \(path, privacy: .public)")
             return
         }
-        do {
-            snapshot = try JSONDecoder().decode(PolicySnapshot.self, from: data)
-        } catch {
-            filterLog.error("reloadSnapshot: decode failed \(error, privacy: .public)")
+        guard mtime != snapshotMTime else { return }
+        guard let data = try? Data(contentsOf: PolicySnapshot.fileURL),
+              let snapshot = try? JSONDecoder().decode(PolicySnapshot.self, from: data) else {
+            filterLog.error("reloadSnapshot: cannot read/decode \(path, privacy: .public)")
+            return
         }
+        snapshotMTime = mtime
+        blockedDomains = Set(snapshot.blockedPatterns.map { $0.domain.lowercased() })
+        filterLog.error("snapshot reloaded — \(self.blockedDomains.count, privacy: .public) domains")
     }
 
     private static func remotePort(_ socket: NEFilterSocketFlow) -> Int? {

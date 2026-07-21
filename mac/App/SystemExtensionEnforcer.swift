@@ -21,12 +21,17 @@ private let extLog = Logger(subsystem: "com.pauljohnson.siteblocker", category: 
 /// is not "set these hosts" — it's "make sure the filter is installed and running"; the snapshot
 /// on disk is what actually changes the behavior.
 final class SystemExtensionEnforcer: NSObject, Enforcer {
+    private var filterConfigured = false
 
     func apply(blockedPatterns: Set<HostPattern>) {
         #if ENABLE_NETWORK_EXTENSION
-        ensureFilterEnabled()
+        // Configure the NEFilterManager once, not every refresh tick — re-saving churns the config
+        // (and can restart the filter). The blocklist itself rides in the snapshot file.
+        if !filterConfigured {
+            filterConfigured = true
+            ensureFilterEnabled()
+        }
         #endif
-        // Snapshot freshness is handled by RuleStore.writeSnapshot; nothing else to do here.
     }
 
     #if ENABLE_NETWORK_EXTENSION

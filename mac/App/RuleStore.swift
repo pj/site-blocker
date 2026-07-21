@@ -41,6 +41,10 @@ final class RuleStore: ObservableObject {
     /// Set while unlocked: the moment up to which viewing time has been charged to the allowed rules.
     private var unlockedSince: Date?
 
+    /// The last blocked set handed to the enforcer/snapshot, so we skip rewriting the (potentially
+    /// multi-megabyte) snapshot file when nothing changed between ticks.
+    private var lastBlocked: Set<HostPattern>?
+
     /// Health of each rule's external target source, for the sites popover.
     struct SourceStatus: Equatable {
         var lastUpdated: Date?
@@ -98,7 +102,10 @@ final class RuleStore: ObservableObject {
 
         blockedNow = engine.blockedPatterns(unlocked: isUnlocked, in: context, usage: usageLookup)
         enforcer.apply(blockedPatterns: blockedNow)
-        persistence.writeSnapshot(PolicySnapshot(blockedPatterns: blockedNow))
+        if blockedNow != lastBlocked {
+            lastBlocked = blockedNow
+            persistence.writeSnapshot(PolicySnapshot(blockedPatterns: blockedNow))
+        }
 
         let map = Dictionary(uniqueKeysWithValues: rules.map { ($0.id, usage.usage(rule: $0.id)) })
         if usageByRule != map { usageByRule = map }
