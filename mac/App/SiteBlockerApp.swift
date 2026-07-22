@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AppIntents
 import Combine
 import RulesEngine
 
@@ -50,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
 
         Notifier.requestAuthorization()   // for budget-countdown alerts while unlocked
+        AppDependencyManager.shared.add(dependency: self.store)   // lets App Intents reach the store
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon()

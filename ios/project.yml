@@ -1,0 +1,91 @@
+# XcodeGen spec for the iOS app. Generate with:  xcodegen generate --spec ios/project.yml
+#
+# Hybrid enforcement:
+#  - Apps: Screen Time / FamilyControls shields, scheduled via DeviceActivity.
+#  - Sites: a Safari Content Blocker extension fed a regenerated rule JSON via an App Group.
+#  - Scheduling: a DeviceActivityMonitor extension re-derives enforcement at window boundaries and
+#    app-budget thresholds so blocking follows the day/time/limit rules without the app open.
+# `ios/Shared` (rule model + enforcement) compiles into the app and the monitor; `RulesEngine`
+# (schedule primitives) is shared with macOS.
+name: SiteBlockerMobile
+options:
+  bundleIdPrefix: com.pauljohnson.siteblocker
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+packages:
+  RulesEngine:
+    path: ../RulesEngine
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  SiteBlockerMobile:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: Shared
+    dependencies:
+      - package: RulesEngine
+      - target: ContentBlocker
+        embed: true
+      - target: DeviceActivityMonitor
+        embed: true
+    info:
+      path: App/Info.plist
+      properties:
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.ios
+        CODE_SIGN_ENTITLEMENTS: App/SiteBlocker.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+
+  ContentBlocker:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ContentBlocker
+    info:
+      path: ContentBlocker/Info.plist
+      properties:
+        CFBundleDisplayName: SiteBlocker Sites
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.Safari.content-blocker
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ContentBlockerRequestHandler
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.ios.ContentBlocker
+        CODE_SIGN_ENTITLEMENTS: ContentBlocker/ContentBlocker.entitlements
+
+  DeviceActivityMonitor:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: DeviceActivityMonitor
+      - path: Shared
+    dependencies:
+      - package: RulesEngine
+    info:
+      path: DeviceActivityMonitor/Info.plist
+      properties:
+        CFBundleDisplayName: SiteBlocker Schedule
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.deviceactivity.monitor-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).DeviceActivityMonitorExtension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.ios.Monitor
+        CODE_SIGN_ENTITLEMENTS: DeviceActivityMonitor/DeviceActivityMonitor.entitlements
+        # Distinct module name — the target folder is "DeviceActivityMonitor", which would otherwise
+        # shadow the framework's DeviceActivityMonitor base class.
+        PRODUCT_MODULE_NAME: SiteBlockerMonitor

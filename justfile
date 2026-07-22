@@ -24,6 +24,16 @@ default:
 generate:
     xcg="$(readlink -f "$(command -v xcodegen)")"; "$xcg" generate --spec {{spec}}
 
+# Generate the iOS Xcode project (Screen Time app, shares RulesEngine)
+ios-generate:
+    xcg="$(readlink -f "$(command -v xcodegen)")"; "$xcg" generate --spec ios/project.yml
+
+# Compile-check the iOS app for the simulator (no signing needed)
+ios-build: ios-generate
+    xcodebuild -project ios/SiteBlockerMobile.xcodeproj -scheme SiteBlockerMobile \
+        -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+        CODE_SIGNING_ALLOWED=NO build | xcbeautify
+
 # Run the RulesEngine unit tests — where the logic is verified
 test:
     cd RulesEngine && swift test
@@ -91,6 +101,13 @@ package: generate
     rm -f SiteBlocker-dist.zip
     ditto -c -k --keepParent "$app" SiteBlocker-dist.zip
     echo "→ SiteBlocker-dist.zip — copy to the other Mac, unzip, drag to /Applications"
+
+# Re-zip the already-installed /Applications app (notarized+stapled by `install`) for copying to
+# another Mac — no re-notarization. This is the file to distribute: SiteBlocker-dist.zip.
+dist:
+    xcrun stapler validate /Applications/SiteBlocker.app
+    ditto -c -k --keepParent /Applications/SiteBlocker.app SiteBlocker-dist.zip
+    @echo "→ SiteBlocker-dist.zip — copy this to the other Mac"
 
 # Print resolved signing settings — handy when provisioning misbehaves
 signing-info: generate
