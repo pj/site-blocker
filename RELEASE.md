@@ -152,6 +152,47 @@ xcrun stapler validate SiteBlocker.app
 
 ---
 
+## Auto-update
+
+SiteBlocker checks GitHub Releases for updates via [Sparkle](https://sparkle-project.org)
+(`mac/project.yml` pulls it in as an SPM package). The app has a "Check for Updates…" menu item
+and also checks automatically once a day (`SUScheduledCheckInterval` in `mac/project.yml`);
+`SUAllowsAutomaticUpdates` is `false`, so installs still require the user to click through
+Sparkle's standard "Install Update" prompt rather than happening silently in the background.
+
+**How it's wired:**
+- `SUFeedURL` (in `mac/project.yml`, target `SiteBlocker` → `info.properties`) points at
+  `appcast.xml` at the repo root, served unauthenticated via `raw.githubusercontent.com` (the repo
+  is public — a private repo would need a different hosting/auth story).
+- `SUPublicEDKey` is the EdDSA public half of a signing keypair. The private half lives **only** in
+  this build machine's login keychain (`sparkle-tools/bin/generate_keys` created it once — same
+  one-time-per-machine pattern as the notarization credentials above). Anyone can read the appcast
+  and the release zips, but only this machine can produce an update Sparkle will accept — Sparkle
+  refuses any enclosure whose signature doesn't verify against `SUPublicEDKey`.
+
+**Publishing a release:**
+```sh
+just release
+```
+This is a separate, explicit step from `just package` — run it once you're ready to publish, after
+bumping and committing the version (see "Updating an already-installed copy" above). It:
+1. Runs `just package` (builds, notarizes, staples → `SiteBlocker-dist.zip`).
+2. Downloads Sparkle's CLI tools into `build/sparkle-tools` (cached after the first run).
+3. Pushes the current commit, then signs the zip (`sign_update`) with the keychain private key.
+4. Creates a GitHub Release (`vX.Y`) on that commit and uploads the zip as an asset.
+5. Appends an `<item>` to `appcast.xml` (`scripts/append_appcast_item.py`) with the new version,
+   download URL, and signature, then commits and pushes it.
+
+Refuses to run if the working tree isn't clean or the release tag already exists. Requires `gh` to
+be authenticated with push access to the repo.
+
+If a machine other than this one ever needs to publish releases, it needs its own Developer ID
+cert + notarization credentials (see above) **and** the Sparkle private key exported from this
+machine's keychain (`generate_keys -x <path>` to export, `generate_keys -f <path>` to import) —
+don't generate a second keypair, or `SUPublicEDKey` in already-shipped builds won't match.
+
+---
+
 ## Changing capabilities (the only time profiles come back)
 
 If you add an entitlement that's profile-gated (a new `com.apple.developer.*` or App Group /

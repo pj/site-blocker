@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>SiteBlocker</title>
+    <link>https://raw.githubusercontent.com/pj/site-blocker/main/appcast.xml</link>
+    <description>SiteBlocker release feed</description>
+    <language>en</language>
+  </channel>
+</rss>

@@ -13,6 +13,12 @@ appdir  := ddata / "Build/Products" / config / "SiteBlocker.app"
 # Keychain profile holding notarization credentials (see `install`). Override in .env.
 notary_profile := env_var_or_default("NOTARY_PROFILE", "siteblocker")
 
+# GitHub repo releases are published to, and the Sparkle CLI tools (sign_update, etc.) used to
+# sign each update — see RELEASE.md "Auto-update".
+gh_repo         := "pj/site-blocker"
+sparkle_version := "2.9.4"
+sparkle_tools   := ddata / "sparkle-tools"
+
 # List available recipes
 default:
     @just --list
@@ -108,6 +114,73 @@ dist:
     xcrun stapler validate /Applications/SiteBlocker.app
     ditto -c -k --keepParent /Applications/SiteBlocker.app SiteBlocker-dist.zip
     @echo "→ SiteBlocker-dist.zip — copy this to the other Mac"
+
+# Download Sparkle's CLI tools (sign_update, generate_appcast) into build/, cached across runs.
+sparkle-tools:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -x "{{sparkle_tools}}/bin/sign_update" ]; then
+        echo "→ fetching Sparkle {{sparkle_version}} CLI tools"
+        rm -rf "{{sparkle_tools}}"
+        mkdir -p "{{sparkle_tools}}"
+        tmp="$(mktemp).tar.xz"
+        curl -sL -o "$tmp" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/{{sparkle_version}}/Sparkle-{{sparkle_version}}.tar.xz"
+        tar -xf "$tmp" -C "{{sparkle_tools}}" bin
+        xattr -dr com.apple.quarantine "{{sparkle_tools}}/bin" 2>/dev/null || true
+        rm -f "$tmp"
+    fi
+
+# Publish a new release: package (signed, notarized, stapled), sign the update for Sparkle,
+# upload to a GitHub Release, and record it in appcast.xml. Run this *after* bumping
+# MARKETING_VERSION/CURRENT_PROJECT_VERSION in mac/project.yml (see RELEASE.md "Updating an
+# already-installed copy") and committing that bump — this recipe reads the versions back out of
+# the built app rather than taking them as arguments, so the two can't drift.
+# Requires: gh authenticated (`gh auth login`), the EdDSA private key in this machine's login
+# keychain (`sparkle-tools/bin/generate_keys`, one-time), a clean working tree.
+release: package sparkle-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    app="{{ddata}}/Build/Products/Release/SiteBlocker.app"
+    short_version="$(defaults read "$(pwd)/$app/Contents/Info" CFBundleShortVersionString)"
+    build="$(defaults read "$(pwd)/$app/Contents/Info" CFBundleVersion)"
+    tag="v${short_version}"
+    zip="SiteBlocker-dist.zip"
+
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "error: working tree not clean — commit the version bump first" >&2
+        exit 1
+    fi
+    if gh release view "$tag" --repo "{{gh_repo}}" >/dev/null 2>&1; then
+        echo "error: release $tag already exists" >&2
+        exit 1
+    fi
+
+    # Push first so the tag `gh release create` makes on GitHub points at this exact commit
+    # (not whatever the remote default branch happened to be at).
+    git push
+    commit="$(git rev-parse HEAD)"
+
+    sig_line="$("{{sparkle_tools}}/bin/sign_update" "$zip")"
+    # sig_line looks like: sparkle:edSignature="..." length="..."
+    signature="$(echo "$sig_line" | sed -n 's/.*edSignature="\([^"]*\)".*/\1/p')"
+    length="$(echo "$sig_line" | sed -n 's/.*length="\([^"]*\)".*/\1/p')"
+
+    gh release create "$tag" "$zip" \
+        --repo "{{gh_repo}}" --title "$tag" --target "$commit" \
+        --notes "SiteBlocker $short_version"
+    # gh's `assets[].url` is already the public browser_download_url (not the API url).
+    url="$(gh release view "$tag" --repo "{{gh_repo}}" --json assets \
+        --jq '.assets[] | select(.name == "SiteBlocker-dist.zip") | .url')"
+
+    python3 scripts/append_appcast_item.py --appcast appcast.xml \
+        --version "$build" --short-version "$short_version" \
+        --url "$url" --length "$length" --signature "$signature"
+
+    git add appcast.xml
+    git commit -m "Release $tag"
+    git push
+    echo "→ $tag published, appcast.xml updated and pushed"
 
 # Print resolved signing settings — handy when provisioning misbehaves
 signing-info: generate

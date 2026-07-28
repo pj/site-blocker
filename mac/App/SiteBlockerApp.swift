@@ -3,6 +3,7 @@ import AppKit
 import AppIntents
 import Combine
 import RulesEngine
+import Sparkle
 
 @main
 struct SiteBlockerApp: App {
@@ -25,6 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var toggleItem: NSMenuItem!
     private var managementWindow: NSWindow?
     private var iconSync: AnyCancellable?
+    // startingUpdater: true launches the standard Sparkle update-checking machinery (background
+    // scheduled checks + user-facing UI) as soon as the controller is created.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     #if ENABLE_NETWORK_EXTENSION
     private let enforcer: SystemExtensionEnforcer
@@ -74,6 +79,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                     action: #selector(showManagementWindow), keyEquivalent: "")
         manageItem.target = self
         menu.addItem(manageItem)
+
+        let updateItem = NSMenuItem(title: "Check for Updates…",
+                                    action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                                    keyEquivalent: "")
+        updateItem.target = updaterController
+        menu.addItem(updateItem)
+
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit SiteBlocker",
                                 action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 

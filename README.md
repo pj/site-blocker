@@ -12,6 +12,8 @@ with AND / OR / NOT.
 - ✅ **Real enforcement** via a `NEFilterDataProvider` content-filter system extension (default
   build). `MockEnforcer` remains as a no-account fallback behind the `ENABLE_NETWORK_EXTENSION`
   flag. See "Signing / credentials".
+- ✅ **Auto-update** via [Sparkle](https://sparkle-project.org), checking GitHub Releases. See
+  `RELEASE.md` → "Auto-update".
 
 ## Architecture
 
@@ -54,7 +56,8 @@ just install                # notarized Developer ID build → /Applications (lo
 ```
 
 Common recipes: `just generate | build | run | install | test | format | signing-info |
-sysext-status | clean`. `build` is an unsigned compile check; `install` is the signed+notarized path.
+sysext-status | clean`. `build` is an unsigned compile check; `install` is the signed+notarized
+path; `just release` publishes a signed auto-update to GitHub Releases (see `RELEASE.md`).
 
 ## Signing / credentials
 
