@@ -12,6 +12,8 @@ ddata   := "build"
 appdir  := ddata / "Build/Products" / config / "SiteBlocker.app"
 # Keychain profile holding notarization credentials (see `install`). Override in .env.
 notary_profile := env_var_or_default("NOTARY_PROFILE", "siteblocker")
+# Developer ID Application identity used to re-sign Sparkle's nested helpers (see resign-sparkle.sh).
+signing_identity := env_var_or_default("SIGNING_IDENTITY", "Developer ID Application: Paul Johnson (YF7LH93MG3)")
 
 # GitHub repo releases are published to, and the Sparkle CLI tools (sign_update, etc.) used to
 # sign each update — see RELEASE.md "Auto-update".
@@ -78,6 +80,9 @@ install: generate
         CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO OTHER_CODE_SIGN_FLAGS=--timestamp \
         build | xcbeautify
 
+    # Xcode doesn't re-sign Sparkle's nested helpers, so notarization would reject them — fix first.
+    scripts/resign-sparkle.sh "$app" "{{signing_identity}}"
+
     ditto -c -k --keepParent "$app" "{{ddata}}/SiteBlocker.zip"
     xcrun notarytool submit "{{ddata}}/SiteBlocker.zip" --keychain-profile "{{notary_profile}}" --wait
     # Staple the app only. Notarization covers the nested system extension by cdhash; stapling the
@@ -97,6 +102,9 @@ package: generate
         -derivedDataPath {{ddata}} \
         CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO OTHER_CODE_SIGN_FLAGS=--timestamp \
         build | xcbeautify
+
+    # Xcode doesn't re-sign Sparkle's nested helpers, so notarization would reject them — fix first.
+    scripts/resign-sparkle.sh "$app" "{{signing_identity}}"
 
     ditto -c -k --keepParent "$app" "{{ddata}}/SiteBlocker.zip"
     xcrun notarytool submit "{{ddata}}/SiteBlocker.zip" --keychain-profile "{{notary_profile}}" --wait
