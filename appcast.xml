@@ -1,9 +1,17 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
   <channel>
     <title>SiteBlocker</title>
     <link>https://raw.githubusercontent.com/pj/site-blocker/main/appcast.xml</link>
     <description>SiteBlocker release feed</description>
     <language>en</language>
+    <item>
+      <title>Version 1.7</title>
+      <pubDate>Sat, 01 Aug 2026 22:47:30 +0000</pubDate>
+      <sparkle:version>8</sparkle:version>
+      <sparkle:shortVersionString>1.7</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/pj/site-blocker/releases/download/v1.7/SiteBlocker-dist.zip" length="1508116" type="application/octet-stream" sparkle:edSignature="M9XnSm7NH5phx+DSd0o8/WhHV+wy5vhfcxEF5RTHp68XARz5fJeiNJrRN11atesI7KwxVfc1VJjJ0zBgy1TxCA==" />
+    </item>
   </channel>
 </rss>
