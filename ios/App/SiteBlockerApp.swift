@@ -7,9 +7,6 @@ struct SiteBlockerMobileApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView().environmentObject(store)
-                .task {
-                    if !store.isAuthorized { await store.requestAuthorization() }
-                }
         }
     }
 }

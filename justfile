@@ -15,6 +15,13 @@ notary_profile := env_var_or_default("NOTARY_PROFILE", "siteblocker")
 # Developer ID Application identity used to re-sign Sparkle's nested helpers (see resign-sparkle.sh).
 signing_identity := env_var_or_default("SIGNING_IDENTITY", "Developer ID Application: Paul Johnson (YF7LH93MG3)")
 
+# App Store Connect API key for uploading iOS builds to TestFlight (App Store Connect → Users and
+# Access → Integrations → App Store Connect API). Put the AuthKey_<KEY_ID>.p8 in
+# ~/.appstoreconnect/private_keys/ and set these in .env. See ios/TESTFLIGHT.md.
+asc_key_id    := env_var_or_default("ASC_KEY_ID", "")
+asc_issuer_id := env_var_or_default("ASC_ISSUER_ID", "")
+ios_archive   := ddata / "SiteBlockerMobile.xcarchive"
+
 # GitHub repo releases are published to, and the Sparkle CLI tools (sign_update, etc.) used to
 # sign each update — see RELEASE.md "Auto-update".
 gh_repo         := "pj/site-blocker"
@@ -41,6 +48,39 @@ ios-build: ios-generate
     xcodebuild -project ios/SiteBlockerMobile.xcodeproj -scheme SiteBlockerMobile \
         -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
         CODE_SIGNING_ALLOWED=NO build | xcbeautify
+
+# Archive the iOS app for App Store distribution. Automatic signing (-allowProvisioningUpdates)
+# registers App IDs and provisions the distribution profiles; this requires the Family Controls
+# (Distribution) entitlement to be APPROVED on your account first (see ios/TESTFLIGHT.md), or
+# provisioning fails. The build number is a timestamp so every archive is unique for TestFlight.
+ios-archive: ios-generate
+    xcodebuild -project ios/SiteBlockerMobile.xcodeproj -scheme SiteBlockerMobile \
+        -configuration Release -destination 'generic/platform=iOS' \
+        -archivePath "{{ios_archive}}" -allowProvisioningUpdates \
+        CURRENT_PROJECT_VERSION="$(date +%Y%m%d%H%M)" \
+        archive | xcbeautify
+
+# Build + upload a new TestFlight build. Updating your iPhone is then one tap in the TestFlight app.
+# Bump MARKETING_VERSION in ios/project.yml when you want a new user-facing version number; the
+# build number is set automatically. One-time setup + the required Apple approval: ios/TESTFLIGHT.md.
+ios-release: ios-archive
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "{{asc_key_id}}" ] || [ -z "{{asc_issuer_id}}" ]; then
+        echo "error: set ASC_KEY_ID and ASC_ISSUER_ID in .env (see ios/TESTFLIGHT.md)" >&2
+        exit 1
+    fi
+    export_dir="{{ddata}}/ios-export"
+    rm -rf "$export_dir"
+    xcodebuild -exportArchive -archivePath "{{ios_archive}}" \
+        -exportOptionsPlist ios/ExportOptions.plist \
+        -exportPath "$export_dir" -allowProvisioningUpdates | xcbeautify
+    ipa="$(ls "$export_dir"/*.ipa | head -1)"
+    echo "→ uploading $ipa to App Store Connect / TestFlight"
+    # altool finds AuthKey_<ASC_KEY_ID>.p8 in ~/.appstoreconnect/private_keys/.
+    xcrun altool --upload-app --type ios --file "$ipa" \
+        --apiKey "{{asc_key_id}}" --apiIssuer "{{asc_issuer_id}}"
+    echo "→ uploaded. Appears in TestFlight after Apple finishes processing (~5–15 min)."
 
 # Run the RulesEngine unit tests — where the logic is verified
 test:

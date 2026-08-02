@@ -1,10 +1,7 @@
 import Foundation
-import FamilyControls
 
-/// iOS coordinator. Owns the rules, requests Screen Time authorization, and delegates all
-/// enforcement to `MobileEnforcer` (shared with the DeviceActivityMonitor extension). Rules enforce
-/// automatically on their day/time/limit schedule; `isLocked` is a manual "block everything now"
-/// override on top of that.
+/// iOS coordinator. Owns the block rules (named domain lists) and a global pause switch, and
+/// delegates ruleset rebuilding to `MobileEnforcer`. Enabled rules block in Safari unless paused.
 @MainActor
 final class MobileStore: ObservableObject {
     /// Shared instance so App Intents (Shortcuts/Siri) control the same state as the UI.
@@ -13,31 +10,14 @@ final class MobileStore: ObservableObject {
     @Published var rules: [MobileRule] {
         didSet {
             MobileEnforcer.saveRules(rules)
-            MobileEnforcer.refreshSchedules(rules)
             MobileEnforcer.reevaluate()
         }
     }
-    @Published private(set) var authorization: AuthorizationStatus =
-        AuthorizationCenter.shared.authorizationStatus
-    /// Manual override: block everything regardless of schedule.
-    @Published private(set) var isLocked: Bool = MobileEnforcer.forceBlock
+    /// When true, nothing is blocked (a temporary break). Inverse of "blocking on".
+    @Published private(set) var isPaused: Bool = MobileEnforcer.isPaused
 
     init() {
         rules = MobileEnforcer.loadRules()
-        MobileEnforcer.refreshSchedules(rules)
-        MobileEnforcer.reevaluate()
-    }
-
-    var isAuthorized: Bool { authorization == .approved }
-
-    func requestAuthorization() async {
-        do {
-            try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
-        } catch {
-            print("Family Controls authorization failed: \(error)")
-        }
-        authorization = AuthorizationCenter.shared.authorizationStatus
-        MobileEnforcer.refreshSchedules(rules)
         MobileEnforcer.reevaluate()
     }
 
@@ -47,17 +27,20 @@ final class MobileStore: ObservableObject {
     func delete(_ rule: MobileRule) { rules.removeAll { $0.id == rule.id } }
     func update(_ rule: MobileRule) {
         guard let idx = rules.firstIndex(where: { $0.id == rule.id }) else { return }
-        rules[idx] = rule   // didSet persists, reschedules, re-evaluates
+        rules[idx] = rule   // didSet persists + re-evaluates
     }
 
-    // MARK: Manual override
+    // MARK: Pause / resume
 
-    func lock() { setOverride(true) }
-    func unlock() { setOverride(false) }
+    /// "Blocking on" in the UI == not paused.
+    var isBlocking: Bool { !isPaused }
 
-    private func setOverride(_ on: Bool) {
-        MobileEnforcer.forceBlock = on
-        isLocked = on
+    func pause() { setPaused(true) }
+    func resume() { setPaused(false) }
+
+    private func setPaused(_ on: Bool) {
+        MobileEnforcer.isPaused = on
+        isPaused = on
         MobileEnforcer.reevaluate()
     }
 }

@@ -1,30 +1,29 @@
 import AppIntents
 
-/// Shortcuts / Siri actions for controlling the block on iOS. They drive the shared `MobileStore`,
-/// so they stay in sync with the app UI. (When real per-rule scheduling + an unlock barrier land,
-/// gate `StopBlockingIntent` the same way as the in-app control.)
+/// Shortcuts / Siri actions for controlling site blocking on iOS. They drive the shared
+/// `MobileStore`, so they stay in sync with the app UI. "Blocking on" == not paused.
 
 struct StartBlockingIntent: AppIntent {
     static let title: LocalizedStringResource = "Start Blocking"
-    static let description = IntentDescription("Blocks your selected apps and websites.")
+    static let description = IntentDescription("Blocks your selected websites in Safari.")
     static let openAppWhenRun = false
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        MobileStore.shared.lock()
+        MobileStore.shared.resume()
         return .result(dialog: "Blocking is on.")
     }
 }
 
 struct StopBlockingIntent: AppIntent {
-    static let title: LocalizedStringResource = "Stop Blocking"
-    static let description = IntentDescription("Unblocks your selected apps and websites.")
+    static let title: LocalizedStringResource = "Pause Blocking"
+    static let description = IntentDescription("Temporarily unblocks your websites.")
     static let openAppWhenRun = false
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        MobileStore.shared.unlock()
-        return .result(dialog: "Blocking is off.")
+        MobileStore.shared.pause()
+        return .result(dialog: "Blocking is paused.")
     }
 }
 
@@ -35,7 +34,7 @@ struct BlockingStatusIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<Bool> {
-        .result(value: MobileStore.shared.isLocked)
+        .result(value: MobileStore.shared.isBlocking)
     }
 }
 
@@ -46,7 +45,7 @@ struct SiteBlockerShortcuts: AppShortcutsProvider {
                               "Block distractions with \(.applicationName)"],
                     shortTitle: "Start Blocking", systemImageName: "lock.fill")
         AppShortcut(intent: StopBlockingIntent(),
-                    phrases: ["Stop blocking with \(.applicationName)"],
-                    shortTitle: "Stop Blocking", systemImageName: "lock.open.fill")
+                    phrases: ["Pause blocking with \(.applicationName)"],
+                    shortTitle: "Pause Blocking", systemImageName: "lock.open.fill")
     }
 }

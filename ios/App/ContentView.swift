@@ -1,7 +1,5 @@
 import SwiftUI
-import FamilyControls
 import UniformTypeIdentifiers
-import RulesEngine
 
 struct ContentView: View {
     @EnvironmentObject private var store: MobileStore
@@ -10,27 +8,17 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
-                if !store.isAuthorized {
-                    Section {
-                        Button("Enable Screen Time access") {
-                            Task { await store.requestAuthorization() }
-                        }
-                    } footer: {
-                        Text("Required to block apps and websites. Approve the Screen Time prompt.")
-                    }
-                }
-
                 Section {
-                    Toggle("Block everything now", isOn: Binding(
-                        get: { store.isLocked },
-                        set: { $0 ? store.lock() : store.unlock() }))
+                    Toggle("Blocking on", isOn: Binding(
+                        get: { store.isBlocking },
+                        set: { $0 ? store.resume() : store.pause() }))
                 } footer: {
-                    Text(store.isLocked
-                         ? "Override on — everything is blocked regardless of schedule."
-                         : "Rules enforce automatically on their days, times, and limits.")
+                    Text(store.isBlocking
+                         ? "Enabled rules' sites are blocked in Safari."
+                         : "Paused — nothing is blocked right now.")
                 }
 
-                Section("Rules") {
+                Section("Blocked sites") {
                     ForEach(store.rules) { rule in
                         Button { editing = rule } label: { RuleRow(rule: rule) }
                             .tint(.primary)
@@ -38,7 +26,7 @@ struct ContentView: View {
                     .onDelete { $0.map { store.rules[$0] }.forEach(store.delete) }
 
                     Button { store.add() } label: {
-                        Label("Add Rule", systemImage: "plus")
+                        Label("Add List", systemImage: "plus")
                     }
                 }
             }
@@ -65,14 +53,11 @@ private struct RuleRow: View {
     }
 }
 
-/// Inline editor: pick apps/sites via the Family Controls picker, then set the schedule.
+/// Editor for one named list of blocked domains: type them, or import from a file or URL.
 private struct RuleEditor: View {
     @EnvironmentObject private var store: MobileStore
     @Environment(\.dismiss) private var dismiss
     @State private var rule: MobileRule
-    @State private var pickerShown = false
-    @State private var timeEnabled: Bool
-    @State private var limitEnabled: Bool
     @State private var sitesText: String
     @State private var showFileImporter = false
     @State private var showURLPrompt = false
@@ -82,8 +67,6 @@ private struct RuleEditor: View {
 
     init(rule: MobileRule) {
         _rule = State(initialValue: rule)
-        _timeEnabled = State(initialValue: rule.window != nil)
-        _limitEnabled = State(initialValue: rule.dailyLimitMinutes != nil)
         _sitesText = State(initialValue: rule.siteDomains.joined(separator: "\n"))
     }
 
@@ -95,14 +78,9 @@ private struct RuleEditor: View {
                     Toggle("Enabled", isOn: $rule.isEnabled)
                 }
 
-                Section("Apps") {
-                    Button("Choose apps…") { pickerShown = true }
-                    Text(rule.summary).font(.caption).foregroundStyle(.secondary)
-                }
-
                 Section {
                     TextEditor(text: $sitesText)
-                        .frame(minHeight: 110)
+                        .frame(minHeight: 160)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .font(.body.monospaced())
@@ -121,44 +99,8 @@ private struct RuleEditor: View {
                 } footer: {
                     Text("One domain per line, or import a list from a file or URL — hosts format and # ! ; comments are handled. Blocks in Safari (and in-app Safari views).")
                 }
-
-                Section("Days") {
-                    HStack {
-                        ForEach(Weekday.allCases, id: \.self) { day in
-                            let on = rule.days.contains(day)
-                            Button(day.shortName) {
-                                if on { rule.days.remove(day) } else { rule.days.insert(day) }
-                            }
-                            .font(.caption).frame(maxWidth: .infinity)
-                            .foregroundStyle(on ? .white : .secondary)
-                            .padding(.vertical, 6)
-                            .background(on ? Color.accentColor : Color.secondary.opacity(0.15),
-                                        in: RoundedRectangle(cornerRadius: 6))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                Section("Time of day") {
-                    Toggle("Only between times", isOn: $timeEnabled)
-                    if timeEnabled {
-                        DatePicker("From", selection: bind(\.startMinutes), displayedComponents: .hourAndMinute)
-                        DatePicker("To", selection: bind(\.endMinutes), displayedComponents: .hourAndMinute)
-                    }
-                }
-
-                Section("Daily limit") {
-                    Toggle("Limit usage per day", isOn: $limitEnabled)
-                    if limitEnabled {
-                        Stepper("\(rule.dailyLimitMinutes ?? 30) min/day",
-                                value: Binding(get: { rule.dailyLimitMinutes ?? 30 },
-                                               set: { rule.dailyLimitMinutes = $0 }),
-                                in: 5...240, step: 5)
-                    }
-                }
             }
-            .navigationTitle("Rule")
-            .familyActivityPicker(isPresented: $pickerShown, selection: $rule.selection)
+            .navigationTitle("Blocked Sites")
             .fileImporter(isPresented: $showFileImporter,
                           allowedContentTypes: [.plainText, .text, .commaSeparatedText, .data]) { result in
                 if case .success(let url) = result { importFile(url) }
@@ -176,9 +118,6 @@ private struct RuleEditor: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         rule.siteDomains = SiteRuleset.parse(sitesText)
-                        rule.window = timeEnabled ? (rule.window ?? TimeWindow(startHour: 9, endHour: 17)) : nil
-                        if !limitEnabled { rule.dailyLimitMinutes = nil }
-                        else if rule.dailyLimitMinutes == nil { rule.dailyLimitMinutes = 30 }
                         store.update(rule)
                         dismiss()
                     }
@@ -221,19 +160,6 @@ private struct RuleEditor: View {
             } catch {
                 importError = "Download failed: \(error.localizedDescription)"
             }
-        }
-    }
-
-    /// Bridge minutes-since-midnight to the Date a `DatePicker(.hourAndMinute)` wants.
-    private func bind(_ keyPath: WritableKeyPath<TimeWindow, Int>) -> Binding<Date> {
-        Binding {
-            let w = rule.window ?? TimeWindow(startHour: 9, endHour: 17)
-            return Calendar.current.startOfDay(for: .now).addingTimeInterval(TimeInterval(w[keyPath: keyPath] * 60))
-        } set: { date in
-            var w = rule.window ?? TimeWindow(startHour: 9, endHour: 17)
-            let c = Calendar.current.dateComponents([.hour, .minute], from: date)
-            w[keyPath: keyPath] = (c.hour ?? 0) * 60 + (c.minute ?? 0)
-            rule.window = w
         }
     }
 }

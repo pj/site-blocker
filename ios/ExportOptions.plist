@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Export options for `just ios-release`: package the archive as an App Store .ipa and let Xcode
+     manage the distribution certificate + provisioning profiles (automatic signing). Uploading the
+     result to App Store Connect is what makes it available in TestFlight. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store</string>
+    <!-- Apple Developer Team ID (same as DEVELOPMENT_TEAM in .env). -->
+    <key>teamID</key>
+    <string>YF7LH93MG3</string>
+    <key>signingStyle</key>
+    <string>automatic</string>
+    <key>uploadSymbols</key>
+    <true/>
+    <!-- Keep the build number we injected at archive time (a timestamp) instead of letting Xcode
+         rewrite it. Every upload must have a unique build number for the same marketing version. -->
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
+    <key>destination</key>
+    <string>export</string>
+</dict>
+</plist>
