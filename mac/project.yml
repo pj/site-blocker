@@ -22,8 +22,8 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # Bump on any change that must reload the *system extension*: the OS only swaps in a new
     # extension binary when its version increases. App + extension stay in lockstep.
-    MARKETING_VERSION: "1.7"
-    CURRENT_PROJECT_VERSION: "8"
+    MARKETING_VERSION: "1.8"
+    CURRENT_PROJECT_VERSION: "9"
 
 targets:
   SiteBlocker:
@@ -49,8 +49,8 @@ targets:
         # Menu-bar / agent app: no Dock icon, no default window at launch.
         LSUIElement: true
         # Bump to force the OS to reload the system extension (see settings.base).
-        CFBundleShortVersionString: "1.7"
-        CFBundleVersion: "8"
+        CFBundleShortVersionString: "1.8"
+        CFBundleVersion: "9"
         # Sparkle auto-update (see RELEASE.md "Auto-update"). Feed is the appcast.xml committed at
         # repo root, served unauthenticated via raw.githubusercontent.com since the repo is public.
         SUFeedURL: https://raw.githubusercontent.com/pj/site-blocker/main/appcast.xml
@@ -89,8 +89,8 @@ targets:
       properties:
         CFBundlePackageType: SYSX
         # The extension's version must match the app's and increase to force a reload.
-        CFBundleShortVersionString: "1.7"
-        CFBundleVersion: "8"
+        CFBundleShortVersionString: "1.8"
+        CFBundleVersion: "9"
         # macOS 26 (Tahoe) requires network_extension-category system extensions to carry this in
         # their *own* Info.plist (not just the host app's), or activation fails.
         NSSystemExtensionUsageDescription: SiteBlocker uses a content filter to block distracting sites according to your rules.
