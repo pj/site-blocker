@@ -169,6 +169,14 @@ release: package sparkle-tools
     git push
     commit="$(git rev-parse HEAD)"
 
+    # GitHub's API can lag a few seconds behind the push, so `gh release create --target <sha>`
+    # right after `git push` may 422 with "target_commitish ... not found". Wait until the API
+    # sees the commit before creating the release.
+    for i in $(seq 1 30); do
+        if gh api "repos/{{gh_repo}}/commits/$commit" >/dev/null 2>&1; then break; fi
+        echo "waiting for GitHub to register $commit ($i)…"; sleep 2
+    done
+
     sig_line="$("{{sparkle_tools}}/bin/sign_update" "$zip")"
     # sig_line looks like: sparkle:edSignature="..." length="..."
     signature="$(echo "$sig_line" | sed -n 's/.*edSignature="\([^"]*\)".*/\1/p')"
