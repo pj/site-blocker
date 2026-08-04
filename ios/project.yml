@@ -44,12 +44,18 @@ targets:
         # No custom/proprietary encryption — declares this up front so TestFlight/App Store
         # doesn't ask the export-compliance question on every single upload.
         ITSAppUsesNonExemptEncryption: false
+        # actool only writes CFBundleIconName nested under CFBundleIcons here, but App Store upload
+        # validation checks the *top-level* key — set it explicitly so uploads pass.
+        CFBundleIconName: AppIcon
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.ios
         CODE_SIGN_ENTITLEMENTS: App/SiteBlocker.entitlements
         TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        # Names the AppIcon set in Assets.xcassets; also makes actool emit CFBundleIconName, which
+        # App Store upload validation requires (else: "Missing Info.plist value CFBundleIconName").
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 
   ContentBlocker:
     type: app-extension

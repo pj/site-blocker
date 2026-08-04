@@ -77,10 +77,17 @@ ios-release: ios-archive
         -exportPath "$export_dir" -allowProvisioningUpdates | xcbeautify
     ipa="$(ls "$export_dir"/*.ipa | head -1)"
     echo "→ uploading $ipa to App Store Connect / TestFlight"
-    # altool finds AuthKey_<ASC_KEY_ID>.p8 in ~/.appstoreconnect/private_keys/.
+    # altool finds AuthKey_<ASC_KEY_ID>.p8 in ~/.appstoreconnect/private_keys/. It can exit 0 even
+    # when validation fails (e.g. a missing icon), so confirm the success line explicitly.
+    log="{{ddata}}/altool-upload.log"
     xcrun altool --upload-app --type ios --file "$ipa" \
-        --apiKey "{{asc_key_id}}" --apiIssuer "{{asc_issuer_id}}"
-    echo "→ uploaded. Appears in TestFlight after Apple finishes processing (~5–15 min)."
+        --apiKey "{{asc_key_id}}" --apiIssuer "{{asc_issuer_id}}" 2>&1 | tee "$log"
+    if grep -q "No errors uploading" "$log"; then
+        echo "→ uploaded. Appears in TestFlight after Apple finishes processing (~5–15 min)."
+    else
+        echo "→ upload FAILED — see the errors above." >&2
+        exit 1
+    fi
 
 # Run the RulesEngine unit tests — where the logic is verified
 test:
