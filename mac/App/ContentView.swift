@@ -249,6 +249,6 @@ private struct QuotaControl: View {
     }
 
     private var exhausted: Bool {
-        enabled && store.usageToday(for: rule) >= TimeInterval(minutes * 60)
+        enabled && store.totalUsageToday >= TimeInterval(minutes * 60)
     }
 }

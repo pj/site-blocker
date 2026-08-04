@@ -16,8 +16,8 @@ private func date(_ y: Int, _ mo: Int, _ d: Int, _ h: Int = 0, _ mi: Int = 0) ->
     return Calendar(identifier: .gregorian).date(from: c)!
 }
 
-private func ctx(_ d: Date) -> RuleContext {
-    RuleContext(now: d, calendar: utc)
+private func ctx(_ d: Date, used: TimeInterval = 0) -> RuleContext {
+    RuleContext(now: d, calendar: utc, unblockedTimeToday: used)
 }
 
 final class HostPatternTests: XCTestCase {
@@ -114,70 +114,68 @@ final class BlockEngineTests: XCTestCase {
                                 targets: ["example.com"], condition: .always)
 
     private func engine() -> BlockEngine { BlockEngine(rules: [socials, video, disabled]) }
-    private func noUsage(_: UUID) -> TimeInterval { 0 }
 
     func testLockedBlocksEveryGovernedSite() {
         // Locked: every enabled rule's sites are blocked; the disabled rule contributes nothing.
-        let blocked = engine().blockedPatterns(unlocked: false, in: ctx(date(2026, 7, 6, 10)),
-                                               usage: noUsage)
+        let blocked = engine().blockedPatterns(unlocked: false, in: ctx(date(2026, 7, 6, 10)))
         XCTAssertEqual(blocked, ["twitter.com", "reddit.com", "youtube.com"])
     }
 
     func testUnlockedInsideWindowAllowsThoseSites() {
-        // Monday 10:00, no usage → both rules eligible → nothing blocked.
-        let blocked = engine().blockedPatterns(unlocked: true, in: ctx(date(2026, 7, 6, 10)),
-                                               usage: noUsage)
+        // Monday 10:00, pool empty → both rules eligible → nothing blocked.
+        let blocked = engine().blockedPatterns(unlocked: true, in: ctx(date(2026, 7, 6, 10)))
         XCTAssertTrue(blocked.isEmpty)
     }
 
-    func testExhaustedBudgetReblocksThatRuleOnly() {
-        // Socials budget spent → its sites re-block; video still allowed.
-        let usage: (UUID) -> TimeInterval = { $0 == self.socials.id ? 30 * 60 : 0 }
-        let blocked = engine().blockedPatterns(unlocked: true, in: ctx(date(2026, 7, 6, 10)),
-                                               usage: usage)
-        XCTAssertEqual(blocked, ["twitter.com", "reddit.com"])
+    func testSharedPoolReblocksRulesPastTheirOwnLimit() {
+        // Shared pool at 20 min: video (20m limit) re-blocks; socials (30m) still allowed.
+        let blocked = engine().blockedPatterns(unlocked: true,
+                                               in: ctx(date(2026, 7, 6, 10), used: 20 * 60))
+        XCTAssertEqual(blocked, ["youtube.com"])
+    }
+
+    func testSharedPoolPastLargestLimitBlocksEverything() {
+        // At 30 min the pool reaches the largest limit → all governed sites re-block.
+        let blocked = engine().blockedPatterns(unlocked: true,
+                                               in: ctx(date(2026, 7, 6, 10), used: 30 * 60))
+        XCTAssertEqual(blocked, ["twitter.com", "reddit.com", "youtube.com"])
     }
 
     func testUnlockedOutsideWindowBlocksThatRule() {
         // Monday 21:00: socials window closed (ineligible); video always eligible.
-        let blocked = engine().blockedPatterns(unlocked: true, in: ctx(date(2026, 7, 6, 21)),
-                                               usage: noUsage)
+        let blocked = engine().blockedPatterns(unlocked: true, in: ctx(date(2026, 7, 6, 21)))
         XCTAssertEqual(blocked, ["twitter.com", "reddit.com"])
     }
 
     func testEligibleRules() {
-        let sat = engine().eligibleRules(in: ctx(date(2026, 7, 11, 10)), usage: noUsage) // Saturday
-        XCTAssertEqual(sat.map(\.name), ["Video — anytime, 20 min"])                     // socials off on weekend
+        let sat = engine().eligibleRules(in: ctx(date(2026, 7, 11, 10))) // Saturday
+        XCTAssertEqual(sat.map(\.name), ["Video — anytime, 20 min"])     // socials off on weekend
     }
 }
 
 final class DailyUsageTests: XCTestCase {
-    func testBucketsPerRulePerLocalDay() {
+    func testSharedTotalPerLocalDay() {
         var usage = DailyUsage(calendar: utc)
-        let a = UUID(), b = UUID()
-        usage.record(10 * 60, rule: a, at: date(2026, 7, 6, 9))
-        usage.record(5 * 60, rule: a, at: date(2026, 7, 6, 14))
-        usage.record(20 * 60, rule: b, at: date(2026, 7, 6, 9))
-        usage.record(3 * 60, rule: a, at: date(2026, 7, 7, 9))
+        usage.record(10 * 60, at: date(2026, 7, 6, 9))
+        usage.record(5 * 60, at: date(2026, 7, 6, 14))
+        usage.record(20 * 60, at: date(2026, 7, 6, 9))
+        usage.record(3 * 60, at: date(2026, 7, 7, 9))
 
-        XCTAssertEqual(usage.usage(rule: a, on: date(2026, 7, 6, 23)), 15 * 60)
-        XCTAssertEqual(usage.usage(rule: b, on: date(2026, 7, 6, 23)), 20 * 60)
-        XCTAssertEqual(usage.usage(rule: a, on: date(2026, 7, 7, 1)), 3 * 60)
-        XCTAssertEqual(usage.totalUsage(on: date(2026, 7, 6, 12)), 35 * 60)
-        XCTAssertEqual(usage.usage(rule: a, on: date(2026, 7, 8)), 0)
+        XCTAssertEqual(usage.total(on: date(2026, 7, 6, 23)), 35 * 60)  // all of the 6th
+        XCTAssertEqual(usage.total(on: date(2026, 7, 7, 1)), 3 * 60)    // separate day
+        XCTAssertEqual(usage.total(on: date(2026, 7, 8)), 0)            // untouched day
     }
 
     func testMergeTakingMaxNeverGivesBackTime() {
-        let a = UUID(), b = UUID()
         var local = DailyUsage(calendar: utc)
-        local.record(20 * 60, rule: a, at: date(2026, 7, 6, 9))   // spent 20m on a here
+        local.record(20 * 60, at: date(2026, 7, 6, 9))            // spent 20m here
         var remote = DailyUsage(calendar: utc)
-        remote.record(5 * 60, rule: a, at: date(2026, 7, 6, 9))    // a stale/smaller value for a
-        remote.record(15 * 60, rule: b, at: date(2026, 7, 6, 9))   // time spent on b elsewhere
+        remote.record(25 * 60, at: date(2026, 7, 6, 9))           // more spent on another device
+        remote.record(15 * 60, at: date(2026, 7, 7, 9))           // and time on a different day
 
         local.mergeTakingMax(remote)
-        XCTAssertEqual(local.usage(rule: a, on: date(2026, 7, 6, 12)), 20 * 60)  // kept the larger
-        XCTAssertEqual(local.usage(rule: b, on: date(2026, 7, 6, 12)), 15 * 60)  // gained the other device's
+        XCTAssertEqual(local.total(on: date(2026, 7, 6, 12)), 25 * 60)  // kept the larger
+        XCTAssertEqual(local.total(on: date(2026, 7, 7, 12)), 15 * 60)  // gained the other day
     }
 }
 

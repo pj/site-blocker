@@ -28,8 +28,7 @@ final class RuleStore: ObservableObject {
     /// whether the Unlock control is offered.
     @Published private(set) var canUnlock = false
 
-    /// Per-rule viewing time used today, and the total — for the "time left" readouts.
-    @Published private(set) var usageByRule: [UUID: TimeInterval] = [:]
+    /// Total unblocked time used today — the shared pool all rules draw down. For the readouts.
     @Published private(set) var totalUsageToday: TimeInterval = 0
 
     private var usage: DailyUsage
@@ -98,29 +97,25 @@ final class RuleStore: ObservableObject {
         }
     }
 
-    /// Viewing time used today for a rule, and how much of its budget remains.
-    func usageToday(for rule: Rule) -> TimeInterval { usageByRule[rule.id] ?? 0 }
-
+    /// How much of a rule's daily limit remains, measured against the shared pool. `nil` = no limit.
     func remainingBudget(for rule: Rule) -> TimeInterval? {
         guard let limit = rule.dailyLimit else { return nil }
-        return max(0, limit - usageToday(for: rule))
+        return max(0, limit - totalUsageToday)
     }
 
-    private func liveContext() -> RuleContext {
-        RuleContext(now: Date(), calendar: .current)
+    private func liveContext(_ now: Date = Date()) -> RuleContext {
+        RuleContext(now: now, calendar: .current, unblockedTimeToday: usage.total(on: now))
     }
-
-    private func usageLookup(_ id: UUID) -> TimeInterval { usage.usage(rule: id) }
 
     /// Recompute the live blocked set, hand it to the enforcer, and refresh the shared snapshot.
-    /// Charges elapsed viewing time to the allowed rules first, so budgets that run out this tick
-    /// re-block immediately.
+    /// Charges elapsed viewing time to the shared daily pool first, so a budget that runs out this
+    /// tick re-blocks immediately.
     func refresh() {
         drainViewingTime()
 
         let context = liveContext()
         let engine = BlockEngine(rules: rules)
-        let eligible = engine.eligibleRules(in: context, usage: usageLookup)
+        let eligible = engine.eligibleRules(in: context)
 
         canUnlock = !eligible.isEmpty
         // Auto-lock once nothing is eligible (all windows closed / budgets spent).
@@ -130,7 +125,7 @@ final class RuleStore: ObservableObject {
         }
 
         let previousBlocked = lastBlocked
-        blockedNow = engine.blockedPatterns(unlocked: isUnlocked, in: context, usage: usageLookup)
+        blockedNow = engine.blockedPatterns(unlocked: isUnlocked, in: context)
         enforcer.apply(blockedPatterns: blockedNow)
         if blockedNow != lastBlocked {
             lastBlocked = blockedNow
@@ -144,38 +139,32 @@ final class RuleStore: ObservableObject {
             TabCloser.closeTabs(blockedDomains: Set(newlyBlocked.map(\.domain)))
         }
 
-        let map = Dictionary(uniqueKeysWithValues: rules.map { ($0.id, usage.usage(rule: $0.id)) })
-        if usageByRule != map { usageByRule = map }
-        let total = usage.totalUsage()
+        let total = usage.total()
         if totalUsageToday != total { totalUsageToday = total }
     }
 
-    /// Charge the time since the last tick to every rule that's currently allowed (unlocked, window
-    /// open, budget left). No-op while locked.
+    /// Charge the time since the last tick to the shared daily pool while unlocked. No-op while
+    /// locked. One pool for all rules, so it drains at wall-clock rate regardless of how many rules
+    /// are currently allowing sites — each rule re-blocks when the pool passes its own limit.
     private func drainViewingTime() {
         guard isUnlocked, let since = unlockedSince else { return }
         let now = Date()
         let elapsed = now.timeIntervalSince(since)
         unlockedSince = now
         guard elapsed > 0 else { return }
-        let engine = BlockEngine(rules: rules)
-        let context = RuleContext(now: now, calendar: .current)
-        var changed = false
-        for rule in engine.eligibleRules(in: context, usage: usageLookup) where rule.dailyLimit != nil {
-            usage.record(elapsed, rule: rule.id, at: now)
-            changed = true
-        }
-        if changed { persistence.save(rules: rules, usage: usage) }
+        usage.record(elapsed, at: now)
+        persistence.save(rules: rules, usage: usage)
         notifyCountdown()
     }
 
-    /// Viewing time left in the session: the soonest a currently-draining, budget-limited rule will
-    /// re-block. `nil` when nothing limited is draining (unlimited or no active rule).
+    /// Viewing time left in the session: how long until every budget-limited rule has re-blocked —
+    /// the largest remaining budget in the shared pool. `nil` when nothing budget-limited is active.
     private func sessionRemaining() -> TimeInterval? {
+        let context = liveContext()
         let engine = BlockEngine(rules: rules)
-        return engine.eligibleRules(in: liveContext(), usage: usageLookup)
-            .compactMap { rule in rule.dailyLimit.map { max(0, $0 - usage.usage(rule: rule.id)) } }
-            .min()
+        return engine.eligibleRules(in: context)
+            .compactMap { rule in rule.dailyLimit.map { max(0, $0 - context.unblockedTimeToday) } }
+            .max()
     }
 
     /// Post a single "time remaining" update every 5 minutes, then a final warning ~1 minute before
@@ -246,7 +235,7 @@ final class RuleStore: ObservableObject {
     func unlock() async {
         let context = liveContext()
         let engine = BlockEngine(rules: rules)
-        guard !engine.eligibleRules(in: context, usage: usageLookup).isEmpty else { return }
+        guard !engine.eligibleRules(in: context).isEmpty else { return }
         guard await Authentication.confirm(reason: "unlock the blocked sites") else { return }
         isUnlocked = true
         unlockedSince = Date()

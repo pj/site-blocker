@@ -1,10 +1,11 @@
 import Foundation
 
-/// Tracks per-rule viewing time spent today, bucketed by local day so each rule's daily budget
-/// resets naturally at local midnight. The app records time against a rule while that rule's sites
-/// are unlocked and viewable; the engine compares it to the rule's `dailyLimit`.
+/// Tracks the single pool of "unblocked" viewing time spent today, bucketed by local day so the
+/// budget resets naturally at local midnight. The app charges wall-clock time to today's bucket
+/// while sites are unlocked; the engine compares this shared total against each rule's `dailyLimit`
+/// (see `BlockEngine`). One total per day — not per rule — so all rules draw down the same pool.
 public struct DailyUsage: Codable, Sendable, Equatable {
-    /// Keyed by "<ruleID>|<Y-M-D>".
+    /// Keyed by "<Y-M-D>".
     private var seconds: [String: TimeInterval]
     public var calendar: Calendar
 
@@ -18,32 +19,23 @@ public struct DailyUsage: Codable, Sendable, Equatable {
         return "\(c.year ?? 0)-\(c.month ?? 0)-\(c.day ?? 0)"
     }
 
-    private func key(rule: UUID, date: Date) -> String {
-        "\(rule.uuidString)|\(dayKey(for: date))"
+    public mutating func record(_ seconds: TimeInterval, at date: Date = Date()) {
+        self.seconds[dayKey(for: date), default: 0] += seconds
     }
 
-    public mutating func record(_ seconds: TimeInterval, rule: UUID, at date: Date = Date()) {
-        self.seconds[key(rule: rule, date: date), default: 0] += seconds
+    /// Total unblocked time used on the given day.
+    public func total(on date: Date = Date()) -> TimeInterval {
+        seconds[dayKey(for: date)] ?? 0
     }
 
-    public func usage(rule: UUID, on date: Date = Date()) -> TimeInterval {
-        seconds[key(rule: rule, date: date)] ?? 0
-    }
-
-    /// Total viewing time across all rules today — for the summary in the window header.
-    public func totalUsage(on date: Date = Date()) -> TimeInterval {
-        let suffix = "|\(dayKey(for: date))"
-        return seconds.filter { $0.key.hasSuffix(suffix) }.values.reduce(0, +)
-    }
-
-    /// Drop buckets from days before `date` so the store doesn't grow without bound.
+    /// Drop buckets from days other than `date` so the store doesn't grow without bound.
     public mutating func pruneDays(before date: Date = Date()) {
-        let today = "|\(dayKey(for: date))"
-        seconds = seconds.filter { $0.key.hasSuffix(today) }
+        let today = dayKey(for: date)
+        seconds = seconds.filter { $0.key == today }
     }
 
-    /// Merge another store in by taking the larger value for each (rule, day) bucket. Used when
-    /// reconciling with iCloud: viewing time already spent on any device is never given back.
+    /// Merge another store in by taking the larger value for each day. Used when reconciling with
+    /// iCloud: viewing time already spent on any device is never given back.
     public mutating func mergeTakingMax(_ other: DailyUsage) {
         for (key, value) in other.seconds {
             seconds[key] = Swift.max(seconds[key] ?? 0, value)
