@@ -33,11 +33,21 @@ final class FilterDataProvider: NEFilterDataProvider {
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
-        // HTTPS (443): peek the outbound handshake so we can read the SNI hostname. Everything else
-        // we allow (the hostname isn't available for plain socket flows).
+        // Only HTTPS (:443) carries a hostname we can match; anything else has no SNI, so allow it.
         guard let socket = flow as? NEFilterSocketFlow, Self.remotePort(socket) == 443 else {
             return .allow()
         }
+        // QUIC / HTTP-3 rides UDP :443 and hides its ClientHello inside encrypted Initial packets, so
+        // the TLS SNI parser below can't read the hostname — a blocked site reached over QUIC would
+        // slip straight through (this is why youtube.com stayed reachable in the browser). While any
+        // site is blocked, drop UDP :443 so the client falls back to TCP/TLS, where the SNI is
+        // readable and we can enforce per-host. When nothing is blocked we leave QUIC alone, so
+        // HTTP-3 keeps working normally.
+        if socket.socketProtocol == IPPROTO_UDP {
+            reloadSnapshotIfNeeded()
+            return blockedDomains.isEmpty ? .allow() : .drop()
+        }
+        // TCP :443 — peek the outbound TLS ClientHello for the SNI hostname.
         return .filterDataVerdict(withFilterInbound: false, peekInboundBytes: 0,
                                   filterOutbound: true, peekOutboundBytes: 4096)
     }
