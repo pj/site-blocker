@@ -6,6 +6,14 @@
     <description>SiteBlocker release feed</description>
     <language>en</language>
     <item>
+      <title>Version 2.0</title>
+      <pubDate>Fri, 07 Aug 2026 23:22:26 +0000</pubDate>
+      <sparkle:version>11</sparkle:version>
+      <sparkle:shortVersionString>2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/pj/site-blocker/releases/download/v2.0/SiteBlocker-dist.zip" length="1503452" type="application/octet-stream" sparkle:edSignature="+RHWc+EFH9x+N/abCUBz1W536zxp9EKkLixO382CZM0AG4S4iWHV8BbqBLmRE9OcEQ6zdFcQVrQz9PkcVheODA==" />
+    </item>
+    <item>
       <title>Version 1.9</title>
       <pubDate>Wed, 05 Aug 2026 00:08:26 +0000</pubDate>
       <sparkle:version>10</sparkle:version>
