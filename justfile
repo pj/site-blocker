@@ -25,6 +25,9 @@ ios_archive   := ddata / "SiteBlockerMobile.xcarchive"
 # GitHub repo releases are published to, and the Sparkle CLI tools (sign_update, etc.) used to
 # sign each update — see RELEASE.md "Auto-update".
 gh_repo         := "pj/site-blocker"
+# Public gist holding the shared rules config the iOS app mirrors (see `publish-config`). Not
+# secret — it's a public gist id. Override in .env if you re-create the gist.
+config_gist_id  := env_var_or_default("CONFIG_GIST_ID", "0c8af88a985245f7fbaadf9060bd3341")
 sparkle_version := "2.9.4"
 sparkle_tools   := ddata / "sparkle-tools"
 
@@ -244,6 +247,11 @@ release: package sparkle-tools
     git commit -m "Release $tag"
     git push
     echo "→ $tag published, appcast.xml updated and pushed"
+
+# Publish the Mac's current rules to the shared config gist, which the iOS app mirrors. The Mac is
+# the source of truth; run this after editing rules to push them to the phone. Uses gh's stored auth.
+publish-config:
+    CONFIG_GIST_ID="{{config_gist_id}}" python3 scripts/publish-config.py
 
 # Print resolved signing settings — handy when provisioning misbehaves
 signing-info: generate

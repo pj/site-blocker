@@ -203,6 +203,18 @@ final class RuleStore: ObservableObject {
         rules[idx] = rule
     }
 
+    /// Replace all rules with those in a shared config fetched from `url` (Settings → Import). The
+    /// config is the source of truth (published by `just publish-config`); remote/file-sourced rules
+    /// resolve their target lists on the next refresh.
+    func importConfig(from url: URL) async throws {
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData   // the gist raw URL is CDN-cached
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let config = try JSONDecoder().decode(SyncedConfig.self, from: data)
+        rules = config.rules.map { $0.toRule() }              // didSet persists + refreshes
+        resolveSources(force: Set(rules.map(\.id)))
+    }
+
     func setEnabled(_ rule: Rule, isEnabled: Bool) {
         guard let idx = rules.firstIndex(where: { $0.id == rule.id }) else { return }
         rules[idx].isEnabled = isEnabled

@@ -4,6 +4,10 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @EnvironmentObject private var store: MobileStore
     @State private var editing: MobileRule?
+    @AppStorage("configURL") private var configURL = ""
+    @State private var importing = false
+    @State private var importStatus: String?
+    @State private var importFailed = false
 
     var body: some View {
         NavigationStack {
@@ -29,10 +33,50 @@ struct ContentView: View {
                         Label("Add List", systemImage: "plus")
                     }
                 }
+
+                Section {
+                    TextField("Config URL", text: $configURL,
+                              prompt: Text("https://…/siteblocker-config.json"))
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                    Button { runImport() } label: {
+                        HStack {
+                            Text("Import from URL")
+                            Spacer()
+                            if importing { ProgressView() }
+                        }
+                    }
+                    .disabled(configURL.isEmpty || importing)
+                    if let importStatus {
+                        Text(importStatus).font(.caption)
+                            .foregroundStyle(importFailed ? .red : .secondary)
+                    }
+                } header: {
+                    Text("Sync")
+                } footer: {
+                    Text("Importing replaces your lists with the shared config published from your Mac.")
+                }
             }
             .navigationTitle("SiteBlocker")
             .sheet(item: $editing) { rule in
                 RuleEditor(rule: rule).environmentObject(store)
+            }
+        }
+    }
+
+    private func runImport() {
+        guard let url = URL(string: configURL.trimmingCharacters(in: .whitespaces)) else {
+            importStatus = "Invalid URL"; importFailed = true; return
+        }
+        importing = true; importStatus = nil; importFailed = false
+        Task {
+            defer { importing = false }
+            do {
+                try await store.importConfig(from: url)
+                importStatus = "Imported \(store.rules.count) lists."; importFailed = false
+            } catch {
+                importStatus = "Failed: \(error.localizedDescription)"; importFailed = true
             }
         }
     }

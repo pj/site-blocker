@@ -13,14 +13,17 @@ struct SiteBlockerApp: App {
         // All UI is driven from AppDelegate via an AppKit NSStatusItem + NSMenu of *standard* menu
         // items (the shape Karabiner-Elements uses). Only real menu tracking keeps an auto-hiding
         // system menu bar revealed, and custom NSHostingView items inside menus lay out unreliably,
-        // so everything is a native item. This empty scene just satisfies the App requirement.
-        Settings { EmptyView() }
+        // so everything is a native item. The Settings scene backs the standard ⌘, window, where
+        // the Config URL / Import lives.
+        Settings {
+            SettingsView().environmentObject(appDelegate.store)
+        }
     }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let store: RuleStore
+    let store: RuleStore
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
     private var toggleItem: NSMenuItem!
