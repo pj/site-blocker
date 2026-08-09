@@ -41,6 +41,11 @@ targets:
       path: App/Info.plist
       properties:
         UILaunchScreen: {}
+        # Reference the build settings (not a baked literal) so `just ios-release`'s timestamp
+        # CURRENT_PROJECT_VERSION override flows into CFBundleVersion — TestFlight needs each upload's
+        # build number to increase. The app and its extension must carry the *same* version.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         # No custom/proprietary encryption — declares this up front so TestFlight/App Store
         # doesn't ask the export-compliance question on every single upload.
         ITSAppUsesNonExemptEncryption: false
@@ -66,6 +71,9 @@ targets:
       path: ContentBlocker/Info.plist
       properties:
         CFBundleDisplayName: SiteBlocker Sites
+        # Must match the host app's version (App Store rejects a mismatch).
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.Safari.content-blocker
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ContentBlockerRequestHandler
