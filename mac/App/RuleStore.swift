@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import OSLog
 import RulesEngine
 
@@ -40,6 +41,11 @@ final class RuleStore: ObservableObject {
     /// Set while unlocked: the moment up to which viewing time has been charged to the allowed rules.
     private var unlockedSince: Date?
 
+    /// When the Mac went to sleep while unlocked, so wake can tell a brief lid-close from a long one.
+    private var sleepStart: Date?
+    /// A wake within this window of sleeping resumes the session without re-auth; longer re-locks.
+    private let sleepLockGrace: TimeInterval = 5 * 60
+
     /// The last blocked set handed to the enforcer/snapshot, so we skip rewriting the (potentially
     /// multi-megabyte) snapshot file when nothing changed between ticks.
     private var lastBlocked: Set<HostPattern>?
@@ -70,6 +76,7 @@ final class RuleStore: ObservableObject {
         startTimer()
         registerHotKey()
         observeCloudChanges()
+        observeSleepWake()
         resolveSources(force: Set(rules.map(\.id)))
         refresh()
     }
@@ -94,6 +101,42 @@ final class RuleStore: ObservableObject {
                     self.refresh()
                 }
             }
+        }
+    }
+
+    /// Stop the budget from draining while the Mac sleeps (e.g. lid closed), and re-lock on wake.
+    /// Without this, the 5s timer is suspended during sleep but the next tick after wake charges the
+    /// whole sleep span (`now - unlockedSince`) — so an unlocked session left closed burns the day's
+    /// budget. NSWorkspace's sleep/wake notifications post on the main thread.
+    private func observeSleepWake() {
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) {
+            [weak self] _ in Task { @MainActor in self?.handleWillSleep() }
+        }
+        center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
+            [weak self] _ in Task { @MainActor in self?.handleDidWake() }
+        }
+    }
+
+    /// About to sleep: charge the time used while awake, then freeze the clock so sleep doesn't count.
+    private func handleWillSleep() {
+        drainViewingTime()          // records awake time up to now
+        unlockedSince = nil         // freeze: no accrual while asleep
+        if isUnlocked { sleepStart = Date() }
+    }
+
+    /// Woke up (lid reopened). A brief nap (≤ grace) resumes the session, charging from wake so the
+    /// sleep itself is free; a longer sleep re-locks so viewing time isn't spent unattended and
+    /// unlock is required again. Either way, sleep time is never charged (`unlockedSince` was nil).
+    private func handleDidWake() {
+        let slept = sleepStart.map { Date().timeIntervalSince($0) } ?? .infinity
+        sleepStart = nil
+        guard isUnlocked else { return }
+        if slept > sleepLockGrace {
+            lock()
+        } else {
+            unlockedSince = Date()  // resume the clock from now
+            refresh()
         }
     }
 
