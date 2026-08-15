@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
     private var toggleItem: NSMenuItem!
+    private var usageItem: NSMenuItem!
     private var managementWindow: NSWindow?
     private var iconSync: AnyCancellable?
     // startingUpdater: true launches the standard Sparkle update-checking machinery (background
@@ -77,6 +78,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleItem.target = self
         menu.addItem(toggleItem)
 
+        // Non-interactive readout of today's viewing time (and time left while unlocked). Disabled so
+        // it reads as a status line rather than a command; refreshed via the store sink below.
+        usageItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        usageItem.isEnabled = false
+        menu.addItem(usageItem)
+
         menu.addItem(.separator())
         let manageItem = NSMenuItem(title: "Manage Rules…",
                                     action: #selector(showManagementWindow), keyEquivalent: "")
@@ -95,12 +102,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem.menu = menu
         updateToggleItem()
+        updateUsageItem()
 
-        // Keep the colored menu-bar icon and toggle item in sync with the blocking state.
+        // Keep the colored menu-bar icon, toggle item, and usage readout in sync with the state.
         iconSync = store.objectWillChange.sink { [weak self] _ in
             Task { @MainActor in
                 self?.updateIcon()
                 self?.updateToggleItem()
+                self?.updateUsageItem()
             }
         }
     }
@@ -142,6 +151,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Unlock is only possible when some rule's window is open with budget left.
             toggleItem.isEnabled = store.canUnlock
         }
+    }
+
+    private func updateUsageItem() {
+        var text = "Viewed today: \(Self.duration(store.totalUsageToday))"
+        if let remaining = store.viewingTimeRemaining {
+            text += "  ·  Time left: \(Self.duration(remaining))"
+        }
+        usageItem.title = text
+    }
+
+    /// Rounds a viewing-time interval to whole minutes for the menu (0m, 8m, 1h 5m).
+    private static func duration(_ seconds: TimeInterval) -> String {
+        let mins = Int(seconds / 60)
+        let h = mins / 60, m = mins % 60
+        if h == 0 { return "\(m)m" }
+        if m == 0 { return "\(h)h" }
+        return "\(h)h \(m)m"
     }
 }
 

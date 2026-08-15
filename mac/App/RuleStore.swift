@@ -200,6 +200,12 @@ final class RuleStore: ObservableObject {
         notifyCountdown()
     }
 
+    /// Viewing time left in the current unlock session, for the menu readout. `nil` when locked or
+    /// nothing budget-limited is currently eligible.
+    var viewingTimeRemaining: TimeInterval? {
+        isUnlocked ? sessionRemaining() : nil
+    }
+
     /// Viewing time left in the session: how long until every budget-limited rule has re-blocked —
     /// the largest remaining budget in the shared pool. `nil` when nothing budget-limited is active.
     private func sessionRemaining() -> TimeInterval? {
