@@ -65,6 +65,9 @@ struct ContentView: View {
 
     private var statusText: String {
         if store.isUnlocked { return "Unlocked" }
+        if store.openAccessActive {
+            return store.canUnlock ? "Some sites open · unlock available" : "Some sites open now"
+        }
         return store.canUnlock ? "Locked — unlock available" : "Locked — no allowance active now"
     }
 
@@ -276,6 +279,7 @@ private struct QuotaControl: View {
         VStack(alignment: .leading, spacing: 3) {
             Toggle(isOn: $enabled) { Text("Daily limit").font(.caption2) }
                 .toggleStyle(.checkbox)
+                .help("Off: these sites are simply available during the window — no unlock, no timer. On: they're unlock-gated (Touch ID) and drain the daily budget below.")
             Stepper("\(minutes) min/day", value: $minutes, in: 5...240, step: 5)
                 .font(.callout)
                 .fixedSize()

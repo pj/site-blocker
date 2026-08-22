@@ -5,7 +5,7 @@ import RulesEngine
 /// which weekdays it applies, an optional time-of-day window, and an optional daily allowance of
 /// unblocked time. They AND together; for OR, add another rule (the engine ORs rules).
 struct RuleSchedule: Equatable {
-    /// All selected = every day (no weekday constraint).
+    /// All selected = every day (no weekday constraint); none selected = never (a permanent block).
     var days: Set<Weekday>
     var timeEnabled: Bool
     var window: TimeWindow
@@ -46,11 +46,16 @@ struct RuleSchedule: Equatable {
         }
     }
 
-    /// The allow *window* — days + time-of-day only (the budget lives in `dailyLimit`). An all-days
-    /// (or empty) selection drops the weekday constraint rather than producing an unusable rule.
+    /// The allow *window* — days + time-of-day only (the budget lives in `dailyLimit`). All days
+    /// selected drops the weekday constraint (every day); *no* days selected pins an empty weekday
+    /// set, which never matches — a rule that's governed but never allowed, i.e. a permanent block.
     var condition: Condition {
         var parts: [Condition] = []
-        if days != Self.everyDay && !days.isEmpty { parts.append(.onDaysOfWeek(days)) }
+        if days.isEmpty {
+            parts.append(.onDaysOfWeek([]))            // never opens → permanent block
+        } else if days != Self.everyDay {
+            parts.append(.onDaysOfWeek(days))
+        }
         if timeEnabled { parts.append(.duringTimeOfDay(window)) }
         switch parts.count {
         case 0: return .always

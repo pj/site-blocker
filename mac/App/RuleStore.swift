@@ -25,9 +25,13 @@ final class RuleStore: ObservableObject {
     /// every launch starts locked/blocked — the safe default.
     @Published private(set) var isUnlocked = false
 
-    /// Whether at least one rule is eligible to unlock right now (window open + budget left). Drives
-    /// whether the Unlock control is offered.
+    /// Whether at least one *budgeted* rule is eligible to unlock right now (window open + budget
+    /// left). No-limit rules open automatically, so they don't count here. Drives the Unlock control.
     @Published private(set) var canUnlock = false
+
+    /// Whether some no-limit rule's window is open right now, so its sites are available without any
+    /// unlock. Lets the UI show an "open" state even while locked.
+    @Published private(set) var openAccessActive = false
 
     /// Total unblocked time used today — the shared pool all rules draw down. For the readouts.
     @Published private(set) var totalUsageToday: TimeInterval = 0
@@ -159,10 +163,13 @@ final class RuleStore: ObservableObject {
         let context = liveContext()
         let engine = BlockEngine(rules: rules)
         let eligible = engine.eligibleRules(in: context)
+        let unlockable = eligible.filter { $0.dailyLimit != nil }
 
-        canUnlock = !eligible.isEmpty
-        // Auto-lock once nothing is eligible (all windows closed / budgets spent).
-        if isUnlocked && eligible.isEmpty {
+        canUnlock = !unlockable.isEmpty
+        openAccessActive = eligible.contains { $0.dailyLimit == nil }
+        // Auto-lock once no *budgeted* rule is eligible (windows closed / budgets spent). No-limit
+        // rules open on their own, so they neither need nor keep an unlock alive.
+        if isUnlocked && unlockable.isEmpty {
             isUnlocked = false
             unlockedSince = nil
         }
@@ -296,7 +303,7 @@ final class RuleStore: ObservableObject {
     func unlock() async {
         let context = liveContext()
         let engine = BlockEngine(rules: rules)
-        guard !engine.eligibleRules(in: context).isEmpty else { return }
+        guard !engine.unlockableRules(in: context).isEmpty else { return }
         guard await Authentication.confirm(reason: "unlock the blocked sites") else { return }
         isUnlocked = true
         unlockedSince = Date()

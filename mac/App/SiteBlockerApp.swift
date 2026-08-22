@@ -134,9 +134,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateIcon() {
-        // Red padlock while locked (sites blocked), green open padlock while unlocked.
-        let symbol = store.isUnlocked ? "lock.open.fill" : "lock.fill"
-        let color: NSColor = store.isUnlocked ? .systemGreen : .systemRed
+        // Green open padlock while some sites are viewable — either unlocked, or a no-limit rule is
+        // auto-open in its window; red padlock otherwise (everything blocked).
+        let open = store.isUnlocked || store.openAccessActive
+        let symbol = open ? "lock.open.fill" : "lock.fill"
+        let color: NSColor = open ? .systemGreen : .systemRed
         statusItem.button?.image = .tintedSymbol(symbol, color: color)
     }
 

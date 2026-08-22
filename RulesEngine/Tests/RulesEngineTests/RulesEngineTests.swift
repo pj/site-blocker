@@ -151,6 +151,30 @@ final class BlockEngineTests: XCTestCase {
         let sat = engine().eligibleRules(in: ctx(date(2026, 7, 11, 10))) // Saturday
         XCTAssertEqual(sat.map(\.name), ["Video — anytime, 20 min"])     // socials off on weekend
     }
+
+    func testNoLimitRuleOpensDuringWindowWithoutUnlock() {
+        // A no-limit rule is "just available" in its window, independent of lock state.
+        let friday = Rule(name: "Friday open", targets: ["youtube.com"],
+                          condition: .onDaysOfWeek([.friday]))   // no dailyLimit
+        let e = BlockEngine(rules: [friday])
+        // Friday 17:00 (2026-07-10 is a Friday) → open even while locked.
+        XCTAssertTrue(e.blockedPatterns(unlocked: false, in: ctx(date(2026, 7, 10, 17))).isEmpty)
+        // Other days → blocked.
+        XCTAssertEqual(e.blockedPatterns(unlocked: false, in: ctx(date(2026, 7, 6, 17))),
+                       ["youtube.com"])
+        // Nothing to "unlock" — a no-limit rule isn't unlockable.
+        XCTAssertTrue(e.unlockableRules(in: ctx(date(2026, 7, 10, 17))).isEmpty)
+    }
+
+    func testEmptyWeekdaySetIsAPermanentBlock() {
+        // No days selected = never opens: governed but never allowed, even when unlocked.
+        let ads = Rule(name: "Ad block", targets: ["ads.example", "track.example"],
+                       condition: .onDaysOfWeek([]))
+        let e = BlockEngine(rules: [ads])
+        XCTAssertEqual(e.blockedPatterns(unlocked: true, in: ctx(date(2026, 7, 10, 17))),
+                       ["ads.example", "track.example"])
+        XCTAssertTrue(e.eligibleRules(in: ctx(date(2026, 7, 10, 17))).isEmpty)
+    }
 }
 
 final class DailyUsageTests: XCTestCase {
