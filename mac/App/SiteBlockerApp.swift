@@ -120,11 +120,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showManagementWindow() {
         if managementWindow == nil {
-            let hosting = NSHostingController(rootView: ContentView().environmentObject(store))
-            let window = NSWindow(contentViewController: hosting)
+            // A plain NSHostingView subclass (not NSHostingController) so we can resign first
+            // responder on a background click — otherwise text fields / time pickers keep focus
+            // when you click out of them, because nothing else in the SwiftUI view claims it.
+            let hosting = FocusDismissingHostingView(rootView: ContentView().environmentObject(store))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 440),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                  backing: .buffered, defer: false)
             window.title = "SiteBlocker"
-            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            window.setContentSize(NSSize(width: 920, height: 440))
+            window.contentView = hosting
             window.isReleasedWhenClosed = false
             window.center()
             managementWindow = window
@@ -170,6 +174,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if h == 0 { return "\(m)m" }
         if m == 0 { return "\(h)h" }
         return "\(h)h \(m)m"
+    }
+}
+
+/// Hosts the SwiftUI content but resigns the window's first responder on a click that lands on a
+/// non-control area. SwiftUI's own hit-testing consumes clicks on actual controls (so tapping a
+/// field still focuses it), leaving background clicks to bubble up to this view's `mouseDown` — where
+/// clearing first responder makes text fields and the time pickers commit and lose focus.
+private final class FocusDismissingHostingView<Content: View>: NSHostingView<Content> {
+    required init(rootView: Content) { super.init(rootView: rootView) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(nil)
+        super.mouseDown(with: event)
     }
 }
 
