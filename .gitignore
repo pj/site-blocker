@@ -21,6 +21,9 @@ ios/App/Info.plist
 ios/ContentBlocker/Info.plist
 ios/DeviceActivityMonitor/Info.plist
 
+# macOS Finder metadata (kept getting re-touched mid-build and dirtying the tree)
+.DS_Store
+
 # Nix
 result
 result-*
