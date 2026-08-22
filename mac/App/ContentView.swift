@@ -4,7 +4,8 @@ import RulesEngine
 /// The rules management screen. Each rule is a single line: three static condition controls (which
 /// days, an optional time-of-day window, an optional daily unblocked-time limit — all ANDed; want
 /// OR? add another rule, the engine ORs rules), a sites button that opens the list editor in a
-/// popover, the enable switch, and delete. Rules have no names.
+/// popover, the enable switch, and delete. An optional free-text name labels the row (purely a
+/// guide for the user — it has no effect on matching).
 struct ContentView: View {
     @EnvironmentObject private var store: RuleStore
 
@@ -88,12 +89,14 @@ private struct RuleRow: View {
     let rule: Rule
 
     @State private var schedule: RuleSchedule
+    @State private var name: String
     @State private var showSites = false
 
     init(rule: Rule) {
         self.rule = rule
         _schedule = State(initialValue: RuleSchedule(condition: rule.condition,
                                                      dailyLimit: rule.dailyLimit))
+        _name = State(initialValue: rule.name)
     }
 
     var body: some View {
@@ -112,6 +115,12 @@ private struct RuleRow: View {
                 .help(rule.isEnabled ? "Disable rule (requires authentication)"
                                      : "Enable rule (requires authentication)")
 
+            LabeledControl(title: "Name") {
+                TextField("Optional", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 150)
+            }
+
             sitesButton
 
             Divider().frame(height: 34)
@@ -125,13 +134,14 @@ private struct RuleRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .onChange(of: schedule) { commit() }
+        .onChange(of: name) { commit() }
     }
 
     private var sitesButton: some View {
         Button {
             showSites = true
         } label: {
-            Label("\(rule.targets.count) sites", systemImage: "list.bullet")
+            Label(sitesSummary, systemImage: sitesIcon)
         }
         .controlSize(.small)
         .popover(isPresented: $showSites, arrowEdge: .bottom) {
@@ -142,8 +152,30 @@ private struct RuleRow: View {
         .help("Edit blocked sites")
     }
 
+    /// An SF Symbol hinting where the list comes from: hand-edited, a local file, or a URL blocklist.
+    private var sitesIcon: String {
+        switch rule.source {
+        case .manual: return "list.bullet"
+        case .file:   return "doc"
+        case .remote: return "link"
+        }
+    }
+
+    /// Summarise the source *and* its size so a file/URL list doesn't read as "1 site". Manual lists
+    /// just show the count; file/remote lists prefix the kind (the count is what they resolved to).
+    private var sitesSummary: String {
+        let n = rule.targets.count
+        let sites = "\(n.formatted()) \(n == 1 ? "site" : "sites")"
+        switch rule.source {
+        case .manual: return sites
+        case .file:   return "File · \(sites)"
+        case .remote: return "URL list · \(sites)"
+        }
+    }
+
     private func commit() {
         var updated = rule
+        updated.name = name
         updated.condition = schedule.condition
         updated.dailyLimit = schedule.dailyLimit
         store.update(updated)
@@ -174,14 +206,20 @@ private struct DaysControl: View {
             HStack(spacing: 3) {
                 ForEach(Weekday.allCases, id: \.self) { day in
                     let on = days.contains(day)
-                    Button(day.letter) { toggle(day) }
-                        .buttonStyle(.plain)
-                        .font(.caption2.weight(.semibold))
-                        .frame(width: 20, height: 20)
-                        .background(Circle().fill(on ? Color.accentColor
-                                                     : Color.secondary.opacity(0.15)))
-                        .foregroundStyle(on ? Color.white : Color.secondary)
-                        .help(day.shortLabel)
+                    // Style lives inside the label (with an explicit contentShape) so the whole
+                    // circle is the tap target — a `.plain` button only hit-tests its label, so
+                    // frame/background applied outside it would leave just the letter clickable.
+                    Button { toggle(day) } label: {
+                        Text(day.letter)
+                            .font(.caption2.weight(.semibold))
+                            .frame(width: 20, height: 20)
+                            .background(Circle().fill(on ? Color.accentColor
+                                                         : Color.secondary.opacity(0.15)))
+                            .foregroundStyle(on ? Color.white : Color.secondary)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(day.shortLabel)
                 }
             }
         }
