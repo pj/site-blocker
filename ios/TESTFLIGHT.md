@@ -5,8 +5,15 @@ the way to keep SiteBlocker installed on your iPhone and update it with **one ta
 
 This build blocks **websites in Safari** via a Content Blocker extension. It uses **no Family
 Controls / Screen Time entitlement**, so there's no special Apple approval to wait on — it goes
-straight to TestFlight. (App blocking and time-of-day scheduling would need the Family Controls
-distribution entitlement; see the git history for that path if you revisit it.)
+straight to TestFlight.
+
+Each list carries an **allow schedule** (days + optional time-of-day window) and optional **Face-ID
+gating**, mirroring the Mac. Because a Safari content blocker is a static ruleset, the app
+re-evaluates the schedule and rewrites the ruleset whenever it runs — on launch, foreground, a timer
+while open, and Background App Refresh. So a window opening or closing takes effect the next time the
+app wakes, **not to the minute in the background**. Exact-time background enforcement (and true
+time-budget limits / app blocking) would need the Family Controls distribution entitlement; see the
+git history for that path if you revisit it.
 
 Once set up, the whole update loop is:
 

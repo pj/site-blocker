@@ -1,14 +1,19 @@
 import Foundation
+import RulesEngine
 
-/// Site-blocking enforcement for the app. Owns the shared rule storage and the paused flag, and
-/// rebuilds the Safari content-blocker ruleset from the currently-blocked domains.
+/// Site-blocking enforcement for the app. Owns the shared rule storage, the paused flag, and the
+/// Face-ID unlock state, and rebuilds the Safari content-blocker ruleset from whatever is blocked
+/// *right now*.
 ///
-/// Model: every enabled rule's domains are blocked in Safari unless blocking is paused. There's no
-/// schedule (that needs DeviceActivity/Family Controls); `reevaluate()` just recomputes the blocked
-/// set and hands it to `SiteRuleset`. The app calls it on edits and on pause/resume.
+/// A Safari content blocker is a static ruleset with no per-request time logic, so the app evaluates
+/// the allow schedule against the current moment (via the shared `BlockEngine`) and rewrites the
+/// ruleset. `reevaluate()` runs on edits, on pause/resume, on lock/unlock, on foreground, on a timer
+/// while the app is open, and on background refresh — so a window boundary takes effect the next
+/// time the app wakes, not to the minute in the background.
 enum MobileEnforcer {
     static let appGroup = "group.com.pauljohnson.siteblocker"
 
+    private static var defaults: UserDefaults? { UserDefaults(suiteName: appGroup) }
     private static var container: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
     }
@@ -28,17 +33,54 @@ enum MobileEnforcer {
 
     /// Temporarily unblock everything (a break). Persisted in the App Group.
     static var isPaused: Bool {
-        get { UserDefaults(suiteName: appGroup)?.bool(forKey: "isPaused") ?? false }
-        set { UserDefaults(suiteName: appGroup)?.set(newValue, forKey: "isPaused") }
+        get { defaults?.bool(forKey: "isPaused") ?? false }
+        set { defaults?.set(newValue, forKey: "isPaused") }
+    }
+
+    // MARK: Face-ID unlock state
+
+    /// The day the user unlocked the Face-ID-gated rules. An unlock lasts until they re-lock or the
+    /// calendar day rolls over (there's no time budget on iOS, so it can't drain).
+    private static var unlockedDay: Date? {
+        get { defaults?.object(forKey: "unlockedDay") as? Date }
+        set {
+            if let newValue { defaults?.set(newValue, forKey: "unlockedDay") }
+            else { defaults?.removeObject(forKey: "unlockedDay") }
+        }
+    }
+
+    /// Whether the gated rules are currently unlocked (only counts if the unlock was today).
+    static var isUnlocked: Bool {
+        guard let day = unlockedDay else { return false }
+        return Calendar.current.isDateInToday(day)
+    }
+
+    static func setUnlocked(_ on: Bool) {
+        unlockedDay = on ? Calendar.current.startOfDay(for: Date()) : nil
     }
 
     // MARK: Evaluation
 
+    private static func engine() -> BlockEngine {
+        BlockEngine(rules: loadRules().map(\.asRule))
+    }
+
+    /// The domains blocked at this instant: paused → nothing; otherwise the engine's blocked set for
+    /// the current time and unlock state.
+    static func blockedDomainsNow() -> [String] {
+        guard !isPaused else { return [] }
+        let blocked = engine().blockedPatterns(unlocked: isUnlocked, in: RuleContext())
+        return blocked.map(\.domain)
+    }
+
+    /// True when some Face-ID-gated rule's window is open right now — i.e. unlocking would reveal
+    /// something. Drives whether the Unlock control is offered.
+    static func canUnlockNow() -> Bool {
+        !engine().unlockableRules(in: RuleContext()).isEmpty
+    }
+
     /// Recompute the blocked domain set and rewrite the Safari ruleset.
     static func reevaluate() {
-        let domains = isPaused ? [] : loadRules()
-            .filter(\.isEnabled)
-            .flatMap(\.siteDomains)
-        SiteRuleset.rebuild(blocking: Array(Set(domains)))
+        SiteRuleset.rebuild(blocking: blockedDomainsNow())
     }
 }

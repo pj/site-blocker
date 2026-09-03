@@ -2,9 +2,12 @@
 #
 # Site blocking (no Family Controls, so no special Apple approval — ships to TestFlight directly):
 #  - Sites: a Safari Content Blocker extension fed a regenerated rule JSON via an App Group.
-#  - The app owns the domain lists and rewrites the ruleset (SiteRuleset) when they change or when
-#    blocking is paused/resumed. Safari content blockers are static rulesets, so there's no
-#    time-of-day scheduling here — that would require the DeviceActivity/Family Controls path.
+#  - The app owns the domain lists (each with an allow schedule: days + optional time window + Face-ID
+#    gating, mirroring macOS) and rewrites the ruleset (SiteRuleset) for the *current moment*. A
+#    Safari content blocker is static, so the app re-evaluates and rebuilds on every wake — launch,
+#    foreground, a timer while open, and Background App Refresh — meaning a schedule boundary takes
+#    effect the next time the app runs, not to the minute in the background. (Exact-time background
+#    enforcement would need the DeviceActivity/Family Controls path this build deliberately avoids.)
 # `ios/Shared` (rule model + ruleset builder) compiles into the app; `RulesEngine` (HostPattern) is
 # shared with macOS.
 name: SiteBlockerMobile
@@ -22,7 +25,7 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
-    MARKETING_VERSION: "0.2"
+    MARKETING_VERSION: "0.3"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
 
@@ -52,6 +55,13 @@ targets:
         # actool only writes CFBundleIconName nested under CFBundleIcons here, but App Store upload
         # validation checks the *top-level* key — set it explicitly so uploads pass.
         CFBundleIconName: AppIcon
+        # Best-effort background rebuilds of the (static) Safari ruleset so a schedule boundary can
+        # take effect while the app is closed. `fetch` enables BGAppRefreshTask; the identifier must
+        # be listed here or BGTaskScheduler.register traps. Foreground is still the reliable path.
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.pauljohnson.siteblocker.ios.refresh
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.ios

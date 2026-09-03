@@ -1,4 +1,5 @@
 import SwiftUI
+import RulesEngine
 import UniformTypeIdentifiers
 
 struct ContentView: View {
@@ -16,9 +17,10 @@ struct ContentView: View {
                     Toggle("Blocking on", isOn: Binding(
                         get: { store.isBlocking },
                         set: { $0 ? store.resume() : store.pause() }))
+                    if store.canUnlock || store.isUnlocked { unlockRow }
                 } footer: {
                     Text(store.isBlocking
-                         ? "Enabled rules' sites are blocked in Safari."
+                         ? "Sites are blocked in Safari according to each list's schedule."
                          : "Paused — nothing is blocked right now.")
                 }
 
@@ -55,12 +57,28 @@ struct ContentView: View {
                 } header: {
                     Text("Sync")
                 } footer: {
-                    Text("Importing replaces your lists with the shared config published from your Mac.")
+                    Text("Importing replaces your lists with the shared config published from your Mac — including each list's days, time window, and Face-ID gating.")
                 }
             }
             .navigationTitle("SiteBlocker")
             .sheet(item: $editing) { rule in
                 RuleEditor(rule: rule).environmentObject(store)
+            }
+        }
+    }
+
+    /// Unlock (Face ID) / Lock control for the Face-ID-gated lists, shown only when one is relevant.
+    private var unlockRow: some View {
+        HStack {
+            if store.isUnlocked {
+                Label("Unlocked", systemImage: "lock.open.fill").foregroundStyle(.green)
+                Spacer()
+                Button("Lock") { store.lock() }
+            } else {
+                Label("Locked", systemImage: "lock.fill").foregroundStyle(.secondary)
+                Spacer()
+                Button("Unlock") { Task { await store.unlock() } }
+                    .disabled(!store.canUnlock)
             }
         }
     }
@@ -89,15 +107,17 @@ private struct RuleRow: View {
             Circle()
                 .fill(rule.isEnabled ? Color.green : Color.secondary)
                 .frame(width: 8, height: 8)
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(rule.name.isEmpty ? "Untitled" : rule.name)
-                Text(rule.summary).font(.caption).foregroundStyle(.secondary)
+                Text("\(rule.siteCountSummary) · \(rule.scheduleSummary)")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
 }
 
-/// Editor for one named list of blocked domains: type them, or import from a file or URL.
+/// Editor for one named list: the domains, plus the allow schedule (days + optional time window)
+/// and optional Face-ID gating — matching the macOS rule model.
 private struct RuleEditor: View {
     @EnvironmentObject private var store: MobileStore
     @Environment(\.dismiss) private var dismiss
@@ -123,6 +143,24 @@ private struct RuleEditor: View {
                 }
 
                 Section {
+                    DaysPicker(days: $rule.days)
+                    Toggle("Time of day", isOn: $rule.timeEnabled)
+                    if rule.timeEnabled {
+                        HStack {
+                            DatePicker("From", selection: minutesBinding(\.startMinutes),
+                                       displayedComponents: .hourAndMinute)
+                            DatePicker("To", selection: minutesBinding(\.endMinutes),
+                                       displayedComponents: .hourAndMinute)
+                        }
+                    }
+                    Toggle("Require Face ID to unlock", isOn: $rule.requiresUnlock)
+                } header: {
+                    Text("Schedule")
+                } footer: {
+                    Text(scheduleFooter)
+                }
+
+                Section {
                     TextEditor(text: $sitesText)
                         .frame(minHeight: 160)
                         .autocorrectionDisabled()
@@ -144,7 +182,8 @@ private struct RuleEditor: View {
                     Text("One domain per line, or import a list from a file or URL — hosts format and # ! ; comments are handled. Blocks in Safari (and in-app Safari views).")
                 }
             }
-            .navigationTitle("Blocked Sites")
+            .navigationTitle("Blocked List")
+            .navigationBarTitleDisplayMode(.inline)
             .fileImporter(isPresented: $showFileImporter,
                           allowedContentTypes: [.plainText, .text, .commaSeparatedText, .data]) { result in
                 if case .success(let url) = result { importFile(url) }
@@ -167,6 +206,31 @@ private struct RuleEditor: View {
                     }
                 }
             }
+        }
+    }
+
+    /// Explains the current schedule state in plain English so the allow-model isn't surprising.
+    private var scheduleFooter: String {
+        if rule.days.isEmpty {
+            return "No days selected — these sites are always blocked. Select the days they're allowed."
+        }
+        var text = "Allowed on the selected days"
+        text += rule.timeEnabled ? " during the time window" : " (all day)"
+        text += ", and blocked otherwise."
+        if rule.requiresUnlock {
+            text += " While allowed, they stay blocked until you unlock with Face ID."
+        }
+        return text
+    }
+
+    /// Bridges minutes-since-midnight to the Date a `DatePicker(.hourAndMinute)` wants.
+    private func minutesBinding(_ keyPath: WritableKeyPath<TimeWindow, Int>) -> Binding<Date> {
+        Binding {
+            Calendar.current.startOfDay(for: Date())
+                .addingTimeInterval(TimeInterval(rule.window[keyPath: keyPath] * 60))
+        } set: { date in
+            let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
+            rule.window[keyPath: keyPath] = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         }
     }
 
@@ -205,5 +269,34 @@ private struct RuleEditor: View {
                 importError = "Download failed: \(error.localizedDescription)"
             }
         }
+    }
+}
+
+/// Seven letter toggles, like Screen Time's day picker. All selected = every day; none = never.
+private struct DaysPicker: View {
+    @Binding var days: Set<Weekday>
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(Weekday.allCases, id: \.self) { day in
+                let on = days.contains(day)
+                Button { toggle(day) } label: {
+                    Text(day.letter)
+                        .font(.footnote.weight(.semibold))
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(on ? Color.accentColor : Color.secondary.opacity(0.15)))
+                        .foregroundStyle(on ? Color.white : Color.secondary)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(day.shortLabel)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 4)
+    }
+
+    private func toggle(_ day: Weekday) {
+        if days.contains(day) { days.remove(day) } else { days.insert(day) }
     }
 }
