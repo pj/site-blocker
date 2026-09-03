@@ -228,3 +228,51 @@ final class CodableTests: XCTestCase {
         XCTAssertEqual(rule.targets, ["x.com"])
     }
 }
+
+/// `SyncedConfig.SyncedRule.toRule()` — the mapping the macOS import path uses. Its day semantics
+/// must match iOS `MobileRule.condition` so a published config means the same thing on both
+/// platforms: nil days = every day, an empty day list = a permanent block (never allowed).
+final class SyncedConfigTests: XCTestCase {
+    private typealias SyncedRule = SyncedConfig.SyncedRule
+
+    /// An empty day list is a permanent block, not "every day" — the ad-blocklist case. The window
+    /// never opens on any weekday, even though there's no time constraint.
+    func testEmptyDaysMapsToPermanentBlock() {
+        let rule = SyncedRule(name: "Ad block", enabled: true, domains: [],
+                              blocklistUrl: "https://example.com/list.txt",
+                              days: [], window: nil, dailyLimitMinutes: nil).toRule()
+        XCTAssertEqual(rule.condition, .onDaysOfWeek([]))
+        // Never open — check a couple of different weekdays (2026-07-06 Mon, 2026-07-10 Fri).
+        XCTAssertFalse(rule.condition.evaluate(in: ctx(date(2026, 7, 6))))
+        XCTAssertFalse(rule.condition.evaluate(in: ctx(date(2026, 7, 10))))
+        // Remote source keeps the URL reference and no inline targets.
+        if case .remote(let url) = rule.source {
+            XCTAssertEqual(url.absoluteString, "https://example.com/list.txt")
+        } else { XCTFail("expected a remote source") }
+        XCTAssertTrue(rule.targets.isEmpty)
+    }
+
+    /// A missing day list means every day: `.always` when there's no window, and it opens on any day.
+    func testNilDaysMapsToEveryDay() {
+        let rule = SyncedRule(name: "All", enabled: true, domains: ["x.com"],
+                              blocklistUrl: nil, days: nil, window: nil, dailyLimitMinutes: nil).toRule()
+        XCTAssertEqual(rule.condition, .always)
+        XCTAssertTrue(rule.condition.evaluate(in: ctx(date(2026, 7, 6))))
+        XCTAssertTrue(rule.condition.evaluate(in: ctx(date(2026, 7, 10))))
+    }
+
+    /// Specific days + a time window + a daily limit map into an ANDed condition, a `dailyLimit`, and
+    /// inline manual targets.
+    func testDaysWindowAndLimitMap() {
+        let rule = SyncedRule(name: "Evening", enabled: true, domains: ["y.com"], blocklistUrl: nil,
+                              days: ["mon", "fri"],
+                              window: .init(start: "18:00", end: "21:00"),
+                              dailyLimitMinutes: 60).toRule()
+        XCTAssertEqual(rule.condition,
+                       .allOf([.onDaysOfWeek([.monday, .friday]),
+                               .duringTimeOfDay(TimeWindow(startMinutes: 18 * 60, endMinutes: 21 * 60))]))
+        XCTAssertEqual(rule.dailyLimit, 3600)
+        XCTAssertEqual(rule.targets, ["y.com"])
+        if case .manual = rule.source {} else { XCTFail("expected a manual source") }
+    }
+}

@@ -34,9 +34,12 @@ public extension SyncedConfig.SyncedRule {
     /// into the rule's `condition`; a missing schedule means `.always`.
     func toRule() -> Rule {
         var parts: [Condition] = []
-        if let days, !days.isEmpty {
-            let set = Set(days.compactMap(Weekday.init(abbreviation:)))
-            if !set.isEmpty { parts.append(.onDaysOfWeek(set)) }
+        // `days == nil` means every day (no weekday constraint). A *present* list pins a weekday
+        // constraint — even when empty: no days = an `.onDaysOfWeek([])` that never opens = a
+        // permanent block. This matches iOS `MobileRule.condition`, so an empty-days rule (e.g. an
+        // always-on ad blocklist) means the same thing whichever platform imports the config.
+        if let days {
+            parts.append(.onDaysOfWeek(Set(days.compactMap(Weekday.init(abbreviation:)))))
         }
         if let window, let start = Self.minutes(window.start), let end = Self.minutes(window.end) {
             parts.append(.duringTimeOfDay(TimeWindow(startMinutes: start, endMinutes: end)))
