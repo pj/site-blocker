@@ -15,7 +15,7 @@ struct ContentView: View {
             List {
                 Section {
                     lockRow
-                    allowanceLine
+                    budgetLine
                 } footer: {
                     Text(footerText)
                 }
@@ -74,31 +74,25 @@ struct ContentView: View {
         return "Lists open automatically during their window. Nothing to unlock right now."
     }
 
-    /// "Time left" readout: how long the current allowance lasts (a window is open) or when the next
-    /// one opens (everything's blocked now).
-    @ViewBuilder private var allowanceLine: some View {
-        if store.allowance.openNow {
-            if let boundary = store.allowance.boundary {
-                Label("Allowance ends in \(Self.durationUntil(boundary))", systemImage: "clock")
-                    .font(.callout).foregroundStyle(.green)
+    /// Daily-limit readout: how much of today's shared budget is left for the time-limited lists.
+    /// Shown only when at least one list has a daily limit.
+    @ViewBuilder private var budgetLine: some View {
+        if let budget = store.budget {
+            if budget.remaining <= 0 {
+                Label("Daily limit reached", systemImage: "hourglass")
+                    .font(.callout).foregroundStyle(.secondary)
             } else {
-                Label("Allowance active — no end scheduled", systemImage: "clock")
-                    .font(.callout).foregroundStyle(.green)
+                Label("Daily limit: \(Self.duration(budget.remaining)) left of \(Self.duration(budget.limit))",
+                      systemImage: "hourglass")
+                    .font(.callout).foregroundStyle(store.isUnlocked ? .green : .secondary)
             }
-        } else if let boundary = store.allowance.boundary {
-            Label("Next allowance in \(Self.durationUntil(boundary))", systemImage: "lock.clock")
-                .font(.callout).foregroundStyle(.secondary)
-        } else {
-            Label("No allowance scheduled", systemImage: "lock.clock")
-                .font(.callout).foregroundStyle(.secondary)
         }
     }
 
-    /// Whole-minute countdown to `date`, rounded up so it never reads "0m" while time remains.
-    private static func durationUntil(_ date: Date) -> String {
-        let secs = max(0, date.timeIntervalSinceNow)
-        var mins = Int(secs / 60)
-        if secs.truncatingRemainder(dividingBy: 60) > 0 { mins += 1 }
+    /// A whole-minute duration, rounded up so a partial minute never reads "0m".
+    private static func duration(_ seconds: TimeInterval) -> String {
+        var mins = Int(seconds / 60)
+        if seconds.truncatingRemainder(dividingBy: 60) > 0 { mins += 1 }
         let h = mins / 60, m = mins % 60
         if h == 0 { return "\(m)m" }
         if m == 0 { return "\(h)h" }

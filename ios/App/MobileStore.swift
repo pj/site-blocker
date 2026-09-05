@@ -30,8 +30,9 @@ final class MobileStore: ObservableObject {
     @Published private(set) var isUnlocked: Bool = MobileEnforcer.isUnlocked
     /// Whether some gated list's window is open, so unlocking would reveal something (enables Unlock).
     @Published private(set) var canUnlock: Bool = MobileEnforcer.canUnlockNow()
-    /// Current allow state + the next boundary, for the "time left" readout.
-    @Published private(set) var allowance = MobileEnforcer.AllowanceStatus(openNow: false, boundary: nil)
+    /// Today's daily-limit budget across the time-limited lists, for the on-screen readout. `nil`
+    /// when no list has a daily limit.
+    @Published private(set) var budget: MobileEnforcer.BudgetStatus? = MobileEnforcer.budgetStatus()
 
     /// Fires while the app is foregrounded so a window boundary crossed with the app open takes
     /// effect promptly (rather than only on the next foreground).
@@ -134,7 +135,7 @@ final class MobileStore: ObservableObject {
         MobileEnforcer.reevaluate()
         isUnlocked = MobileEnforcer.isUnlocked
         canUnlock = MobileEnforcer.canUnlockNow()
-        allowance = MobileEnforcer.allowanceStatus()
+        budget = MobileEnforcer.budgetStatus()
     }
 
     /// The app came to the foreground: rebuild now, re-arm the alerts, and start the while-open timer.

@@ -108,6 +108,22 @@ enum MobileEnforcer {
         !engine().unlockableRules(in: context()).isEmpty
     }
 
+    /// Today's shared daily-limit budget across the enabled time-limited lists, for the on-screen
+    /// readout. `limit` is the overall cap (the largest per-list limit, since they share one pool);
+    /// `remaining` is what's left of it. `nil` when no enabled list has a daily limit.
+    struct BudgetStatus: Equatable, Sendable {
+        var used: TimeInterval
+        var limit: TimeInterval
+        var remaining: TimeInterval { max(0, limit - used) }
+    }
+
+    static func budgetStatus(now: Date = Date()) -> BudgetStatus? {
+        let limits = loadRules().filter(\.isEnabled).compactMap(\.dailyLimitMinutes)
+        guard let maxMinutes = limits.max() else { return nil }
+        return BudgetStatus(used: unblockedTimeToday(now: now),
+                            limit: TimeInterval(maxMinutes * 60))
+    }
+
     /// The current allow state and the next moment it flips — drives the "time left" readout.
     /// `openNow` is whether any enabled list's window is open right now; `boundary` is when the
     /// current window next closes (if open now) or when the next window opens (if closed now); `nil`
