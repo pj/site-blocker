@@ -26,14 +26,10 @@ final class MobileStore: ObservableObject {
             Self.scheduleAllowanceNotifications() // the schedule changed, so the allowance alerts may have too
         }
     }
-    /// When true, nothing is blocked (a temporary break). Inverse of "blocking on".
-    @Published private(set) var isPaused: Bool = MobileEnforcer.isPaused
-    /// Whether Face-ID-gated rules are currently unlocked.
+    /// Whether the Face-ID-gated lists are currently unlocked (the single manual override).
     @Published private(set) var isUnlocked: Bool = MobileEnforcer.isUnlocked
-    /// Whether some gated rule's window is open, so unlocking would reveal something.
+    /// Whether some gated list's window is open, so unlocking would reveal something (enables Unlock).
     @Published private(set) var canUnlock: Bool = MobileEnforcer.canUnlockNow()
-    /// Whether a break is allowed right now (some list's allow-window is open). Gates "Blocking off".
-    @Published private(set) var canPause = false
     /// Current allow state + the next boundary, for the "time left" readout.
     @Published private(set) var allowance = MobileEnforcer.AllowanceStatus(openNow: false, boundary: nil)
 
@@ -104,23 +100,6 @@ final class MobileStore: ObservableObject {
         return h * 60 + m
     }
 
-    // MARK: Pause / resume
-
-    /// "Blocking on" in the UI == not paused.
-    var isBlocking: Bool { !isPaused }
-
-    /// Take a break (turn blocking off). Only permitted while a window is open — returns whether it
-    /// applied, so callers (UI / App Intents) can tell the user when it's not an option right now.
-    @discardableResult
-    func pause() -> Bool {
-        guard MobileEnforcer.allowanceStatus().openNow else { return false }
-        MobileEnforcer.isPaused = true
-        reevaluate()
-        return true
-    }
-
-    func resume() { MobileEnforcer.isPaused = false; reevaluate() }
-
     // MARK: Face-ID lock / unlock
 
     /// Prompt for Face ID and, on success, reveal the gated rules' sites for the rest of the day.
@@ -146,18 +125,15 @@ final class MobileStore: ObservableObject {
     /// Recompute the blocked set for *now*, rewrite the ruleset, and refresh the published state
     /// (an unlock may have lapsed at midnight; a window may have opened or closed).
     func reevaluate() {
-        let status = MobileEnforcer.allowanceStatus()
-        // A break is only valid while a window is open; when it closes, re-block automatically so a
-        // pause can't outlast the allowance that justified it.
-        if MobileEnforcer.isPaused && !status.openNow {
-            MobileEnforcer.isPaused = false
+        // Auto-relock once no gated window is open — an unlock can't outlast the allowance that
+        // justified it (and it lapses at midnight anyway).
+        if MobileEnforcer.isUnlocked && !MobileEnforcer.canUnlockNow() {
+            MobileEnforcer.setUnlocked(false)
         }
         MobileEnforcer.reevaluate()
-        isPaused = MobileEnforcer.isPaused
         isUnlocked = MobileEnforcer.isUnlocked
         canUnlock = MobileEnforcer.canUnlockNow()
-        allowance = status
-        canPause = status.openNow
+        allowance = MobileEnforcer.allowanceStatus()
     }
 
     /// The app came to the foreground: rebuild now, re-arm the alerts, and start the while-open timer.

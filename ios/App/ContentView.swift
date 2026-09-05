@@ -14,14 +14,8 @@ struct ContentView: View {
         NavigationStack {
             List {
                 Section {
-                    Toggle("Blocking on", isOn: Binding(
-                        get: { store.isBlocking },
-                        set: { on in if on { store.resume() } else { _ = store.pause() } }))
-                        // Turning blocking *off* is only offered while a window is open; turning it
-                        // back on is always allowed.
-                        .disabled(store.isBlocking && !store.canPause)
+                    lockRow
                     allowanceLine
-                    if store.canUnlock || store.isUnlocked { unlockRow }
                 } footer: {
                     Text(footerText)
                 }
@@ -69,15 +63,15 @@ struct ContentView: View {
         }
     }
 
-    /// Footer under the blocking switch, tuned to whether a break is available right now.
+    /// Footer under the lock control, tuned to the current unlock state.
     private var footerText: String {
-        if !store.isBlocking {
-            return "Paused — nothing is blocked. Blocking resumes automatically when the window closes."
+        if store.isUnlocked {
+            return "Unlocked — your restricted lists are open. They re-lock automatically when the window ends."
         }
-        if store.canPause {
-            return "Sites are blocked per each list's schedule. You can take a break now — it ends when the window closes."
+        if store.canUnlock {
+            return "Sites follow each list's schedule. Your restricted lists can be unlocked now with Face ID."
         }
-        return "Sites are blocked per each list's schedule. A break isn't available outside an allowed window."
+        return "Sites follow each list's schedule. Nothing to unlock right now."
     }
 
     /// "Time left" readout: how long the current allowance lasts (a window is open) or when the next
@@ -111,8 +105,9 @@ struct ContentView: View {
         return "\(h)h \(m)m"
     }
 
-    /// Unlock (Face ID) / Lock control for the Face-ID-gated lists, shown only when one is relevant.
-    private var unlockRow: some View {
+    /// The single manual control: unlock the Face-ID-gated lists (during their window) or re-lock.
+    /// Unlock is disabled when nothing is currently unlockable; the schedule handles everything else.
+    private var lockRow: some View {
         HStack {
             if store.isUnlocked {
                 Label("Unlocked", systemImage: "lock.open.fill").foregroundStyle(.green)

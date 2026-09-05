@@ -31,12 +31,6 @@ enum MobileEnforcer {
         if let data = try? JSONEncoder().encode(rules) { try? data.write(to: url) }
     }
 
-    /// Temporarily unblock everything (a break). Persisted in the App Group.
-    static var isPaused: Bool {
-        get { defaults?.bool(forKey: "isPaused") ?? false }
-        set { defaults?.set(newValue, forKey: "isPaused") }
-    }
-
     // MARK: Face-ID unlock state
 
     /// The day the user unlocked the Face-ID-gated rules. An unlock lasts until they re-lock or the
@@ -65,12 +59,10 @@ enum MobileEnforcer {
         BlockEngine(rules: loadRules().map(\.asRule))
     }
 
-    /// The domains blocked at this instant: paused → nothing; otherwise the engine's blocked set for
-    /// the current time and unlock state.
+    /// The domains blocked at this instant: the engine's blocked set for the current time and unlock
+    /// state (no-limit lists open in their windows; gated lists open only while unlocked).
     static func blockedDomainsNow() -> [String] {
-        guard !isPaused else { return [] }
-        let blocked = engine().blockedPatterns(unlocked: isUnlocked, in: RuleContext())
-        return blocked.map(\.domain)
+        engine().blockedPatterns(unlocked: isUnlocked, in: RuleContext()).map(\.domain)
     }
 
     /// True when some Face-ID-gated rule's window is open right now — i.e. unlocking would reveal
@@ -79,11 +71,10 @@ enum MobileEnforcer {
         !engine().unlockableRules(in: RuleContext()).isEmpty
     }
 
-    /// The current allow state and the next moment it flips — drives the "time left" readout and the
-    /// break gate. A break (turning blocking off) is only allowed while a window is open. `boundary`
-    /// is when the current window next closes (if open now) or when the next window opens (if closed
-    /// now); `nil` when it won't change within the search horizon — an always-open list, or nothing
-    /// scheduled at all.
+    /// The current allow state and the next moment it flips — drives the "time left" readout.
+    /// `openNow` is whether any enabled list's window is open right now; `boundary` is when the
+    /// current window next closes (if open now) or when the next window opens (if closed now); `nil`
+    /// when it won't change within the search horizon — an always-open list, or nothing scheduled.
     struct AllowanceStatus: Equatable, Sendable {
         var openNow: Bool
         var boundary: Date?
