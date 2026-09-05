@@ -66,12 +66,12 @@ struct ContentView: View {
     /// Footer under the lock control, tuned to the current unlock state.
     private var footerText: String {
         if store.isUnlocked {
-            return "Unlocked — your restricted lists are open. They re-lock automatically when the window ends."
+            return "Unlocked — your time-limited lists are open. They re-lock when the budget is spent or the window ends."
         }
         if store.canUnlock {
-            return "Sites follow each list's schedule. Your restricted lists can be unlocked now with Face ID."
+            return "Lists open automatically during their window. Time-limited lists can be unlocked now with Face ID."
         }
-        return "Sites follow each list's schedule. Nothing to unlock right now."
+        return "Lists open automatically during their window. Nothing to unlock right now."
     }
 
     /// "Time left" readout: how long the current allowance lasts (a window is open) or when the next
@@ -192,6 +192,14 @@ private struct RuleEditor: View {
                                        displayedComponents: .hourAndMinute)
                         }
                     }
+                    Toggle("Daily limit (Face ID)", isOn: Binding(
+                        get: { rule.dailyLimitMinutes != nil },
+                        set: { rule.dailyLimitMinutes = $0 ? (rule.dailyLimitMinutes ?? 30) : nil }))
+                    if let minutes = rule.dailyLimitMinutes {
+                        Stepper("\(minutes) min/day", value: Binding(
+                            get: { minutes },
+                            set: { rule.dailyLimitMinutes = $0 }), in: 5...240, step: 5)
+                    }
                 } header: {
                     Text("Schedule")
                 } footer: {
@@ -250,11 +258,15 @@ private struct RuleEditor: View {
     /// Explains the current schedule state in plain English so the allow-model isn't surprising.
     private var scheduleFooter: String {
         if rule.days.isEmpty {
-            return "No days selected — these sites are always blocked. Select the days they can be unlocked."
+            return "No days selected — these sites are always blocked. Select the days they're allowed."
         }
         var text = "On the selected days"
         text += rule.timeEnabled ? " during the time window" : " (all day)"
-        text += ", these sites can be unlocked with Face ID; they stay blocked otherwise."
+        if let minutes = rule.dailyLimitMinutes {
+            text += ", these sites need a Face ID unlock and stay open for up to \(minutes) min/day; blocked otherwise."
+        } else {
+            text += ", these sites are open automatically; blocked otherwise. Turn on Daily limit to require Face ID."
+        }
         return text
     }
 

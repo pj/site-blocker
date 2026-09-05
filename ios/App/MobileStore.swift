@@ -90,7 +90,8 @@ final class MobileStore: ObservableObject {
             rule.timeEnabled = true
             rule.window = TimeWindow(startMinutes: start, endMinutes: end)
         }
-        return rule   // every iOS list is unlock-gated; the config's daily-limit flag doesn't apply
+        rule.dailyLimitMinutes = synced.dailyLimitMinutes   // a limit → Face-ID-gated + budgeted
+        return rule
     }
 
     private static func minutes(_ hhmm: String) -> Int? {
@@ -124,8 +125,9 @@ final class MobileStore: ObservableObject {
     /// Recompute the blocked set for *now*, rewrite the ruleset, and refresh the published state
     /// (an unlock may have lapsed at midnight; a window may have opened or closed).
     func reevaluate() {
-        // Auto-relock once no gated window is open — an unlock can't outlast the allowance that
-        // justified it (and it lapses at midnight anyway).
+        MobileEnforcer.chargeUsage()   // charge elapsed unlocked time to today's budget
+        // Auto-relock once nothing is left to unlock — every limited list's window has closed or its
+        // budget is spent (and the budget resets at midnight anyway).
         if MobileEnforcer.isUnlocked && !MobileEnforcer.canUnlockNow() {
             MobileEnforcer.setUnlocked(false)
         }

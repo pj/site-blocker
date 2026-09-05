@@ -4,12 +4,14 @@ import RulesEngine
 // without importing the app module.
 
 /// Verifies the blocking logic the iOS app relies on: `MobileRule.asRule` → `BlockEngine`, which is
-/// what `MobileEnforcer.blockedDomainsNow()` uses. Post-1.6 every list is unlock-gated, so an
-/// enabled, in-window list blocks its sites until unlocked — these tests pin that down and prove a
-/// list only ever blocks its *own* domains.
+/// what `MobileEnforcer.blockedDomainsNow()` uses.
+///
+/// Model: a list with **no daily limit** opens automatically during its window (no Face ID); a list
+/// **with a daily limit** is Face-ID-gated — blocked until unlocked, then open until the shared daily
+/// budget of unlocked time is spent. Empty days = permanent block.
 final class BlockingLogicTests: XCTestCase {
 
-    /// 2026-07-06 is a Monday, 09:00 and 19:00 UTC used for window checks.
+    /// 2026-07-06 is a Monday; `hour` lets tests probe inside/outside a time window.
     private func monday(_ hour: Int = 9, _ minute: Int = 0) -> Date {
         var c = DateComponents()
         c.year = 2026; c.month = 7; c.day = 6; c.hour = hour; c.minute = minute
@@ -17,57 +19,67 @@ final class BlockingLogicTests: XCTestCase {
         return Calendar(identifier: .gregorian).date(from: c)!
     }
 
-    /// Mirror of `MobileEnforcer.blockedDomainsNow()`: map the lists to engine rules and ask the
-    /// engine what's blocked at `date` for the given unlock state.
-    private func blocked(_ rules: [MobileRule], unlocked: Bool, at date: Date) -> Set<String> {
+    /// Mirror of `MobileEnforcer.blockedDomainsNow()`: map lists to engine rules and ask what's
+    /// blocked at `date` for the given unlock state and minutes of budget already spent today.
+    private func blocked(_ rules: [MobileRule], unlocked: Bool,
+                         usedMinutes: Double = 0, at date: Date) -> Set<String> {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "UTC")!
         let engine = BlockEngine(rules: rules.map(\.asRule))
-        return Set(engine.blockedPatterns(unlocked: unlocked,
-                                          in: RuleContext(now: date, calendar: cal)).map(\.domain))
+        let ctx = RuleContext(now: date, calendar: cal, unblockedTimeToday: usedMinutes * 60)
+        return Set(engine.blockedPatterns(unlocked: unlocked, in: ctx).map(\.domain))
     }
 
-    /// A list allowed every day (window always open) unless overridden.
-    private func list(_ name: String, _ domains: [String],
-                      enabled: Bool = true, days: Set<Weekday> = MobileRule.everyDay) -> MobileRule {
+    private func list(_ name: String, _ domains: [String], enabled: Bool = true,
+                      days: Set<Weekday> = MobileRule.everyDay, limitMinutes: Int? = nil) -> MobileRule {
         var r = MobileRule()
-        r.name = name
-        r.isEnabled = enabled
-        r.siteDomains = domains
-        r.days = days
+        r.name = name; r.isEnabled = enabled; r.siteDomains = domains
+        r.days = days; r.dailyLimitMinutes = limitMinutes
         return r
     }
 
-    // MARK: No rules / disabled rules block nothing (matches "disable all → sites available")
+    // MARK: No rules / disabled rules block nothing
 
     func testNoRulesBlockNothing() {
         XCTAssertEqual(blocked([], unlocked: false, at: monday()), [])
     }
 
     func testDisabledRuleBlocksNothing() {
-        let rules = [list("YT", ["youtube.com"], enabled: false)]
+        let rules = [list("YT", ["youtube.com"], enabled: false, limitMinutes: 30)]
         XCTAssertEqual(blocked(rules, unlocked: false, at: monday()), [])
-        XCTAssertEqual(blocked(rules, unlocked: true, at: monday()), [])
     }
 
-    // MARK: One enabled, in-window list — the reported scenario
+    // MARK: No-limit lists auto-open during their window (option B — no Face ID)
 
-    /// Locked: an enabled, currently-valid list blocks its sites (you must unlock). This is the
-    /// post-1.6 behavior the user is seeing.
-    func testEnabledInWindowListBlocksWhenLocked() {
-        let rules = [list("YT", ["youtube.com"])]
+    /// The reported fix: an enabled, in-window list *without* a limit is accessible with no unlock.
+    func testNoLimitListAutoOpensDuringWindow() {
+        let rules = [list("News", ["bbc.com"])]
+        XCTAssertEqual(blocked(rules, unlocked: false, at: monday()), [])
+    }
+
+    /// …but is blocked outside its window.
+    func testNoLimitListBlockedOutsideWindow() {
+        let rules = [list("Weekend", ["bbc.com"], days: [.sunday])]   // today is Monday
+        XCTAssertEqual(blocked(rules, unlocked: false, at: monday()), ["bbc.com"])
+    }
+
+    // MARK: Time-limited lists are Face-ID-gated and budget-bounded
+
+    func testLimitedListBlockedWhenLockedAllowedWhenUnlocked() {
+        let rules = [list("YT", ["youtube.com"], limitMinutes: 30)]
         XCTAssertEqual(blocked(rules, unlocked: false, at: monday()), ["youtube.com"])
-    }
-
-    /// Unlocked: the same list's sites become available.
-    func testEnabledInWindowListAllowedWhenUnlocked() {
-        let rules = [list("YT", ["youtube.com"])]
         XCTAssertEqual(blocked(rules, unlocked: true, at: monday()), [])
     }
 
-    /// A list only ever blocks its *own* domains — enabling one list never blocks unrelated sites.
-    func testListBlocksOnlyItsOwnDomains() {
-        let rules = [list("YT", ["youtube.com", "reddit.com"])]
+    /// Once the daily budget is spent, a limited list re-blocks even while unlocked.
+    func testLimitedListReblocksWhenBudgetSpent() {
+        let rules = [list("YT", ["youtube.com"], limitMinutes: 30)]
+        XCTAssertEqual(blocked(rules, unlocked: true, usedMinutes: 10, at: monday()), [])
+        XCTAssertEqual(blocked(rules, unlocked: true, usedMinutes: 30, at: monday()), ["youtube.com"])
+    }
+
+    func testLimitedListBlocksOnlyItsOwnDomains() {
+        let rules = [list("YT", ["youtube.com", "reddit.com"], limitMinutes: 30)]
         let result = blocked(rules, unlocked: false, at: monday())
         XCTAssertEqual(result, ["youtube.com", "reddit.com"])
         XCTAssertFalse(result.contains("example.com"))
@@ -75,16 +87,14 @@ final class BlockingLogicTests: XCTestCase {
 
     // MARK: Schedule edges
 
-    /// No days selected is a permanent block — never openable, even unlocked.
     func testNoDaysIsPermanentBlock() {
-        let rules = [list("Perm", ["x.com"], days: [])]
-        XCTAssertEqual(blocked(rules, unlocked: false, at: monday()), ["x.com"])
+        let rules = [list("Perm", ["x.com"], days: [], limitMinutes: 30)]
         XCTAssertEqual(blocked(rules, unlocked: true, at: monday()), ["x.com"])
     }
 
-    /// Outside the time window the sites stay blocked even when unlocked; inside, unlocking frees them.
-    func testTimeWindowGatesUnlock() {
-        var r = list("Evening", ["x.com"])
+    /// A limited list outside its time window stays blocked even when unlocked with budget to spare.
+    func testTimeWindowGatesLimitedList() {
+        var r = list("Evening", ["x.com"], limitMinutes: 60)
         r.timeEnabled = true
         r.window = TimeWindow(startHour: 18, endHour: 21)
         XCTAssertEqual(blocked([r], unlocked: true, at: monday(9)), ["x.com"])   // 09:00 — closed
