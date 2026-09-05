@@ -90,8 +90,7 @@ final class MobileStore: ObservableObject {
             rule.timeEnabled = true
             rule.window = TimeWindow(startMinutes: start, endMinutes: end)
         }
-        rule.requiresUnlock = synced.dailyLimitMinutes != nil
-        return rule
+        return rule   // every iOS list is unlock-gated; the config's daily-limit flag doesn't apply
     }
 
     private static func minutes(_ hhmm: String) -> Int? {
@@ -102,7 +101,7 @@ final class MobileStore: ObservableObject {
 
     // MARK: Face-ID lock / unlock
 
-    /// Prompt for Face ID and, on success, reveal the gated rules' sites for the rest of the day.
+    /// Prompt for Face ID and, on success, reveal the currently-allowed lists' sites for the day.
     @discardableResult
     func unlock() async -> Bool {
         guard MobileEnforcer.canUnlockNow() else { return false }

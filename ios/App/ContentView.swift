@@ -192,7 +192,6 @@ private struct RuleEditor: View {
                                        displayedComponents: .hourAndMinute)
                         }
                     }
-                    Toggle("Require Face ID to unlock", isOn: $rule.requiresUnlock)
                 } header: {
                     Text("Schedule")
                 } footer: {
@@ -251,14 +250,11 @@ private struct RuleEditor: View {
     /// Explains the current schedule state in plain English so the allow-model isn't surprising.
     private var scheduleFooter: String {
         if rule.days.isEmpty {
-            return "No days selected — these sites are always blocked. Select the days they're allowed."
+            return "No days selected — these sites are always blocked. Select the days they can be unlocked."
         }
-        var text = "Allowed on the selected days"
+        var text = "On the selected days"
         text += rule.timeEnabled ? " during the time window" : " (all day)"
-        text += ", and blocked otherwise."
-        if rule.requiresUnlock {
-            text += " While allowed, they stay blocked until you unlock with Face ID."
-        }
+        text += ", these sites can be unlocked with Face ID; they stay blocked otherwise."
         return text
     }
 
