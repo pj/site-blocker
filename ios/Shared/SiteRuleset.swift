@@ -33,14 +33,24 @@ enum SiteRuleset {
     }
 
     /// Write the ruleset that blocks `domains` (each domain and its subdomains) and ask Safari to
-    /// reload it. Empty list = a valid empty ruleset (blocks nothing).
+    /// reload it.
     static func rebuild(blocking domains: [String]) {
-        let rules: [[String: Any]] = stride(from: 0, to: domains.count, by: chunkSize).map { start in
+        var rules: [[String: Any]] = stride(from: 0, to: domains.count, by: chunkSize).map { start in
             let chunk = domains[start..<min(start + chunkSize, domains.count)]
             return [
                 "action": ["type": "block"],
                 "trigger": ["url-filter": ".*", "if-domain": chunk.map { "*\($0)" }],
             ]
+        }
+        // WebKit *rejects* an empty rule array and keeps the previously-compiled ruleset — which
+        // would leave sites blocked even after everything is unblocked. When nothing is blocked,
+        // emit a single no-op rule (scoped to a domain that can't exist) so a valid, non-empty
+        // ruleset always compiles and replaces the old one.
+        if rules.isEmpty {
+            rules = [[
+                "action": ["type": "block"],
+                "trigger": ["url-filter": ".*", "if-domain": ["*siteblocker.invalid"]],
+            ]]
         }
 
         guard let container = FileManager.default
