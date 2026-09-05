@@ -91,3 +91,18 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.ios.ContentBlocker
         CODE_SIGN_ENTITLEMENTS: ContentBlocker/ContentBlocker.entitlements
+
+  # Fast logic tests for the blocking rules. No test host: it compiles the rule model straight in
+  # and exercises the shared BlockEngine, so `just ios-test` runs it headlessly on a simulator.
+  SiteBlockerMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+      - path: Shared/MobileRule.swift
+    dependencies:
+      - package: RulesEngine
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.ios.tests
+        GENERATE_INFOPLIST_FILE: YES

@@ -52,6 +52,21 @@ ios-build: ios-generate
         -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
         CODE_SIGNING_ALLOWED=NO build | xcbeautify
 
+# Run the iOS blocking-logic tests on a simulator (headless). Uses the first available booted-or-not
+# iPhone simulator; creates "SB-Test-iPhone" if none is found.
+ios-test: ios-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name="SB-Test-iPhone"
+    if ! xcrun simctl list devices | grep -q "$name"; then
+        runtime="$(xcrun simctl list runtimes | grep -m1 -o 'com.apple.CoreSimulator.SimRuntime.iOS[^ ]*')"
+        devtype="$(xcrun simctl list devicetypes | grep -m1 -o 'com.apple.CoreSimulator.SimDeviceType.iPhone-[^)]*')"
+        xcrun simctl create "$name" "$devtype" "$runtime"
+    fi
+    xcodebuild test -project ios/SiteBlockerMobile.xcodeproj -scheme SiteBlockerMobileTests \
+        -sdk iphonesimulator -destination "platform=iOS Simulator,name=$name" \
+        CODE_SIGNING_ALLOWED=NO | xcbeautify
+
 # Archive the iOS app for App Store distribution. Automatic signing (-allowProvisioningUpdates)
 # registers App IDs and provisions the distribution profiles; this requires the Family Controls
 # (Distribution) entitlement to be APPROVED on your account first (see ios/TESTFLIGHT.md), or
