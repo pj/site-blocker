@@ -16,13 +16,14 @@ final class MobileStore: ObservableObject {
     static let shared = MobileStore()
 
     /// Background App Refresh task id — opportunistic, best-effort rebuilds while the app is closed.
-    static let refreshTaskID = "com.pauljohnson.siteblocker.ios.refresh"
+    /// `nonisolated` so the background-queue launch handler can read it without a main-actor hop.
+    nonisolated static let refreshTaskID = "com.pauljohnson.siteblocker.ios.refresh"
 
     @Published var rules: [MobileRule] {
         didSet {
             MobileEnforcer.saveRules(rules)
             reevaluate()            // persists + rebuilds the Safari ruleset for the current moment
-            scheduleNotifications() // the schedule changed, so the allowance alerts may have too
+            Self.scheduleAllowanceNotifications() // the schedule changed, so the allowance alerts may have too
         }
     }
     /// When true, nothing is blocked (a temporary break). Inverse of "blocking on".
@@ -44,7 +45,7 @@ final class MobileStore: ObservableObject {
         rules = MobileEnforcer.loadRules()
         Notifier.requestAuthorization()   // for allowance wind-down / availability alerts
         reevaluate()
-        scheduleNotifications()
+        Self.scheduleAllowanceNotifications()
     }
 
     // MARK: Rules
@@ -162,7 +163,7 @@ final class MobileStore: ObservableObject {
     /// The app came to the foreground: rebuild now, re-arm the alerts, and start the while-open timer.
     func onForeground() {
         reevaluate()
-        scheduleNotifications()
+        Self.scheduleAllowanceNotifications()
         tick?.invalidate()
         tick = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.reevaluate() }
@@ -174,7 +175,7 @@ final class MobileStore: ObservableObject {
     func onBackground() {
         tick?.invalidate()
         tick = nil
-        scheduleNotifications()
+        Self.scheduleAllowanceNotifications()
         Self.scheduleBackgroundRefresh()
     }
 
@@ -185,7 +186,7 @@ final class MobileStore: ObservableObject {
     /// allowance closes — plus a heads-up when the next allowance opens. Scheduled ahead with time
     /// triggers, so they fire even while the app is closed. Wording stays about the *schedule* (not
     /// "blocked now"), since enforcement only catches up the next time the app wakes.
-    private func scheduleNotifications() {
+    nonisolated static func scheduleAllowanceNotifications() {
         var requests: [UNNotificationRequest] = []
         let status = MobileEnforcer.allowanceStatus()
         if status.openNow, let close = status.boundary {
@@ -211,20 +212,29 @@ final class MobileStore: ObservableObject {
     // MARK: Background App Refresh (best effort)
 
     /// Register the background-refresh handler. Call once, before the app finishes launching.
-    static func registerBackgroundTask() {
+    ///
+    /// `nonisolated` is load-bearing: iOS invokes the launch handler on a background queue, so the
+    /// closure must NOT be main-actor-isolated. If this method were `@MainActor` (inherited from the
+    /// type), the closure would inherit that isolation and Swift's runtime isolation check would trap
+    /// (`_dispatch_assert_queue_fail`, SIGTRAP) the moment the OS ran it off the main thread. We hop
+    /// to the main actor explicitly for the store work instead.
+    nonisolated static func registerBackgroundTask() {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshTaskID, using: nil) { task in
-            Task { @MainActor in
-                shared.reevaluate()
-                shared.scheduleNotifications()   // keep the allowance alerts fresh
-                scheduleBackgroundRefresh()      // chain the next one
-                task.setTaskCompleted(success: true)
-            }
+            task.expirationHandler = { task.setTaskCompleted(success: false) }
+            // All work here is nonisolated — recompute the static ruleset, re-arm the alerts, and
+            // chain the next refresh. It reads persisted rules straight from `MobileEnforcer`, not the
+            // @MainActor store's @Published state (there's no UI in the background), so there's no
+            // actor hop and the non-Sendable `task` never crosses an isolation boundary.
+            MobileEnforcer.reevaluate()
+            scheduleAllowanceNotifications()
+            scheduleBackgroundRefresh()   // chain the next one
+            task.setTaskCompleted(success: true)
         }
     }
 
     /// Ask iOS to wake us later to re-evaluate. iOS decides if/when — this only nudges the schedule
     /// forward while the app is closed; foreground is still the reliable path.
-    static func scheduleBackgroundRefresh() {
+    nonisolated static func scheduleBackgroundRefresh() {
         let request = BGAppRefreshTaskRequest(identifier: refreshTaskID)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
         try? BGTaskScheduler.shared.submit(request)
