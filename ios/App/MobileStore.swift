@@ -1,5 +1,6 @@
 import Foundation
 import BackgroundTasks
+import UserNotifications
 import RulesEngine
 
 /// iOS coordinator. Owns the block rules (named domain lists with an allow schedule), the global
@@ -20,7 +21,8 @@ final class MobileStore: ObservableObject {
     @Published var rules: [MobileRule] {
         didSet {
             MobileEnforcer.saveRules(rules)
-            reevaluate()   // persists + rebuilds the Safari ruleset for the current moment
+            reevaluate()            // persists + rebuilds the Safari ruleset for the current moment
+            scheduleNotifications() // the schedule changed, so the allowance alerts may have too
         }
     }
     /// When true, nothing is blocked (a temporary break). Inverse of "blocking on".
@@ -29,6 +31,10 @@ final class MobileStore: ObservableObject {
     @Published private(set) var isUnlocked: Bool = MobileEnforcer.isUnlocked
     /// Whether some gated rule's window is open, so unlocking would reveal something.
     @Published private(set) var canUnlock: Bool = MobileEnforcer.canUnlockNow()
+    /// Whether a break is allowed right now (some list's allow-window is open). Gates "Blocking off".
+    @Published private(set) var canPause = false
+    /// Current allow state + the next boundary, for the "time left" readout.
+    @Published private(set) var allowance = MobileEnforcer.AllowanceStatus(openNow: false, boundary: nil)
 
     /// Fires while the app is foregrounded so a window boundary crossed with the app open takes
     /// effect promptly (rather than only on the next foreground).
@@ -36,7 +42,9 @@ final class MobileStore: ObservableObject {
 
     init() {
         rules = MobileEnforcer.loadRules()
+        Notifier.requestAuthorization()   // for allowance wind-down / availability alerts
         reevaluate()
+        scheduleNotifications()
     }
 
     // MARK: Rules
@@ -100,7 +108,16 @@ final class MobileStore: ObservableObject {
     /// "Blocking on" in the UI == not paused.
     var isBlocking: Bool { !isPaused }
 
-    func pause() { MobileEnforcer.isPaused = true; reevaluate() }
+    /// Take a break (turn blocking off). Only permitted while a window is open — returns whether it
+    /// applied, so callers (UI / App Intents) can tell the user when it's not an option right now.
+    @discardableResult
+    func pause() -> Bool {
+        guard MobileEnforcer.allowanceStatus().openNow else { return false }
+        MobileEnforcer.isPaused = true
+        reevaluate()
+        return true
+    }
+
     func resume() { MobileEnforcer.isPaused = false; reevaluate() }
 
     // MARK: Face-ID lock / unlock
@@ -128,26 +145,67 @@ final class MobileStore: ObservableObject {
     /// Recompute the blocked set for *now*, rewrite the ruleset, and refresh the published state
     /// (an unlock may have lapsed at midnight; a window may have opened or closed).
     func reevaluate() {
+        let status = MobileEnforcer.allowanceStatus()
+        // A break is only valid while a window is open; when it closes, re-block automatically so a
+        // pause can't outlast the allowance that justified it.
+        if MobileEnforcer.isPaused && !status.openNow {
+            MobileEnforcer.isPaused = false
+        }
         MobileEnforcer.reevaluate()
         isPaused = MobileEnforcer.isPaused
         isUnlocked = MobileEnforcer.isUnlocked
         canUnlock = MobileEnforcer.canUnlockNow()
+        allowance = status
+        canPause = status.openNow
     }
 
-    /// The app came to the foreground: rebuild now and start the while-open timer.
+    /// The app came to the foreground: rebuild now, re-arm the alerts, and start the while-open timer.
     func onForeground() {
         reevaluate()
+        scheduleNotifications()
         tick?.invalidate()
         tick = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.reevaluate() }
         }
     }
 
-    /// The app went to the background: stop the timer and queue a best-effort background rebuild.
+    /// The app went to the background: stop the timer, re-arm the alerts for the closed period, and
+    /// queue a best-effort background rebuild.
     func onBackground() {
         tick?.invalidate()
         tick = nil
+        scheduleNotifications()
         Self.scheduleBackgroundRefresh()
+    }
+
+    // MARK: Notifications
+
+    /// (Re)schedule the allowance notifications from the current schedule. Mirrors the desktop's
+    /// wind-down warnings — a 5-minute and a final 1-minute (with sound) alert before the current
+    /// allowance closes — plus a heads-up when the next allowance opens. Scheduled ahead with time
+    /// triggers, so they fire even while the app is closed. Wording stays about the *schedule* (not
+    /// "blocked now"), since enforcement only catches up the next time the app wakes.
+    private func scheduleNotifications() {
+        var requests: [UNNotificationRequest] = []
+        let status = MobileEnforcer.allowanceStatus()
+        if status.openNow, let close = status.boundary {
+            if let r = Notifier.request(id: "allowance-warn-5",
+                                        body: "5 minutes of allowed time left.",
+                                        at: close.addingTimeInterval(-5 * 60)) { requests.append(r) }
+            if let r = Notifier.request(id: "allowance-warn-1",
+                                        body: "About 1 minute of allowed time left.",
+                                        at: close.addingTimeInterval(-60), sound: true) { requests.append(r) }
+            // The window that follows, so there's a heads-up when access returns.
+            if let nextOpen = MobileEnforcer.allowanceStatus(now: close.addingTimeInterval(1)).boundary,
+               let r = Notifier.request(id: "allowance-open",
+                                        body: "Your allowed time is available again.",
+                                        at: nextOpen) { requests.append(r) }
+        } else if let open = status.boundary {
+            if let r = Notifier.request(id: "allowance-open",
+                                        body: "Your allowed time is now available.",
+                                        at: open) { requests.append(r) }
+        }
+        Notifier.reschedule(requests)
     }
 
     // MARK: Background App Refresh (best effort)
@@ -157,7 +215,8 @@ final class MobileStore: ObservableObject {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshTaskID, using: nil) { task in
             Task { @MainActor in
                 shared.reevaluate()
-                scheduleBackgroundRefresh()   // chain the next one
+                shared.scheduleNotifications()   // keep the allowance alerts fresh
+                scheduleBackgroundRefresh()      // chain the next one
                 task.setTaskCompleted(success: true)
             }
         }

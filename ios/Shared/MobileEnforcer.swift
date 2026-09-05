@@ -79,6 +79,33 @@ enum MobileEnforcer {
         !engine().unlockableRules(in: RuleContext()).isEmpty
     }
 
+    /// The current allow state and the next moment it flips — drives the "time left" readout and the
+    /// break gate. A break (turning blocking off) is only allowed while a window is open. `boundary`
+    /// is when the current window next closes (if open now) or when the next window opens (if closed
+    /// now); `nil` when it won't change within the search horizon — an always-open list, or nothing
+    /// scheduled at all.
+    struct AllowanceStatus: Equatable, Sendable {
+        var openNow: Bool
+        var boundary: Date?
+    }
+
+    static func allowanceStatus(now: Date = Date()) -> AllowanceStatus {
+        let engine = engine()
+        let calendar = Calendar.current
+        func openAt(_ instant: Date) -> Bool {
+            !engine.eligibleRules(in: RuleContext(now: instant, calendar: calendar)).isEmpty
+        }
+        let openNow = openAt(now)
+        // Windows repeat weekly, so any flip happens within a week; scan 8 days at one-minute steps.
+        for minute in 1...(8 * 24 * 60) {
+            let instant = now.addingTimeInterval(TimeInterval(minute * 60))
+            if openAt(instant) != openNow {
+                return AllowanceStatus(openNow: openNow, boundary: instant)
+            }
+        }
+        return AllowanceStatus(openNow: openNow, boundary: nil)
+    }
+
     /// Recompute the blocked domain set and rewrite the Safari ruleset.
     static func reevaluate() {
         SiteRuleset.rebuild(blocking: blockedDomainsNow())

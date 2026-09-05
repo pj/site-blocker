@@ -22,8 +22,10 @@ struct StopBlockingIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        MobileStore.shared.pause()
-        return .result(dialog: "Blocking is paused.")
+        let paused = MobileStore.shared.pause()
+        return .result(dialog: paused
+                       ? "Blocking is paused."
+                       : "Blocking can't be paused right now — you're outside an allowed window.")
     }
 }
 

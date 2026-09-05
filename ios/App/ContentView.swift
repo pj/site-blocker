@@ -16,12 +16,14 @@ struct ContentView: View {
                 Section {
                     Toggle("Blocking on", isOn: Binding(
                         get: { store.isBlocking },
-                        set: { $0 ? store.resume() : store.pause() }))
+                        set: { on in if on { store.resume() } else { _ = store.pause() } }))
+                        // Turning blocking *off* is only offered while a window is open; turning it
+                        // back on is always allowed.
+                        .disabled(store.isBlocking && !store.canPause)
+                    allowanceLine
                     if store.canUnlock || store.isUnlocked { unlockRow }
                 } footer: {
-                    Text(store.isBlocking
-                         ? "Sites are blocked in Safari according to each list's schedule."
-                         : "Paused — nothing is blocked right now.")
+                    Text(footerText)
                 }
 
                 Section("Blocked sites") {
@@ -65,6 +67,48 @@ struct ContentView: View {
                 RuleEditor(rule: rule).environmentObject(store)
             }
         }
+    }
+
+    /// Footer under the blocking switch, tuned to whether a break is available right now.
+    private var footerText: String {
+        if !store.isBlocking {
+            return "Paused — nothing is blocked. Blocking resumes automatically when the window closes."
+        }
+        if store.canPause {
+            return "Sites are blocked per each list's schedule. You can take a break now — it ends when the window closes."
+        }
+        return "Sites are blocked per each list's schedule. A break isn't available outside an allowed window."
+    }
+
+    /// "Time left" readout: how long the current allowance lasts (a window is open) or when the next
+    /// one opens (everything's blocked now).
+    @ViewBuilder private var allowanceLine: some View {
+        if store.allowance.openNow {
+            if let boundary = store.allowance.boundary {
+                Label("Allowance ends in \(Self.durationUntil(boundary))", systemImage: "clock")
+                    .font(.callout).foregroundStyle(.green)
+            } else {
+                Label("Allowance active — no end scheduled", systemImage: "clock")
+                    .font(.callout).foregroundStyle(.green)
+            }
+        } else if let boundary = store.allowance.boundary {
+            Label("Next allowance in \(Self.durationUntil(boundary))", systemImage: "lock.clock")
+                .font(.callout).foregroundStyle(.secondary)
+        } else {
+            Label("No allowance scheduled", systemImage: "lock.clock")
+                .font(.callout).foregroundStyle(.secondary)
+        }
+    }
+
+    /// Whole-minute countdown to `date`, rounded up so it never reads "0m" while time remains.
+    private static func durationUntil(_ date: Date) -> String {
+        let secs = max(0, date.timeIntervalSinceNow)
+        var mins = Int(secs / 60)
+        if secs.truncatingRemainder(dividingBy: 60) > 0 { mins += 1 }
+        let h = mins / 60, m = mins % 60
+        if h == 0 { return "\(m)m" }
+        if m == 0 { return "\(h)h" }
+        return "\(h)h \(m)m"
     }
 
     /// Unlock (Face ID) / Lock control for the Face-ID-gated lists, shown only when one is relevant.
