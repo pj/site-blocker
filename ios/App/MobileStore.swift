@@ -149,11 +149,6 @@ final class MobileStore: ObservableObject {
 
     /// The app came to the foreground: rebuild now, re-arm the alerts, and start the while-open timer.
     func onForeground() {
-        // The Control Center toggle can't prompt Face ID, so an unlock request lands here.
-        if MobileEnforcer.pendingUnlockRequest {
-            MobileEnforcer.pendingUnlockRequest = false
-            Task { await unlock() }
-        }
         reevaluate()
         Self.scheduleAllowanceNotifications()
         tick?.invalidate()
