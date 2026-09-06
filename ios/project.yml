@@ -25,7 +25,7 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
-    MARKETING_VERSION: "1.8"
+    MARKETING_VERSION: "1.9"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
 
@@ -39,6 +39,8 @@ targets:
     dependencies:
       - package: RulesEngine
       - target: ContentBlocker
+        embed: true
+      - target: SiteBlockerControls
         embed: true
     info:
       path: App/Info.plist
@@ -91,6 +93,31 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.ios.ContentBlocker
         CODE_SIGN_ENTITLEMENTS: ContentBlocker/ContentBlocker.entitlements
+
+  # Control Center control (iOS 18+): a WidgetKit extension exposing a Lock/Unlock ControlWidget.
+  # Compiles the Shared enforcement code so it can flip the unlock state and rewrite the ruleset.
+  SiteBlockerControls:
+    type: app-extension
+    platform: iOS
+    deploymentTarget:
+      iOS: "18.0"
+    sources:
+      - path: Controls
+      - path: Shared
+    dependencies:
+      - package: RulesEngine
+    info:
+      path: Controls/Info.plist
+      properties:
+        CFBundleDisplayName: SiteBlocker Controls
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.ios.Controls
+        CODE_SIGN_ENTITLEMENTS: Controls/Controls.entitlements
 
   # Fast logic tests for the blocking rules. No test host: it compiles the rule model straight in
   # and exercises the shared BlockEngine, so `just ios-test` runs it headlessly on a simulator.

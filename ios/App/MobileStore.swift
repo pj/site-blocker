@@ -1,6 +1,7 @@
 import Foundation
 import BackgroundTasks
 import UserNotifications
+import WidgetKit
 import RulesEngine
 
 /// iOS coordinator. Owns the block rules (named domain lists with an allow schedule), the global
@@ -136,10 +137,23 @@ final class MobileStore: ObservableObject {
         isUnlocked = MobileEnforcer.isUnlocked
         canUnlock = MobileEnforcer.canUnlockNow()
         budget = MobileEnforcer.budgetStatus()
+        reloadControl()   // keep the Control Center toggle in sync
+    }
+
+    /// Refresh the Control Center Lock toggle so it reflects the current lock state.
+    private func reloadControl() {
+        if #available(iOS 18.0, *) {
+            ControlCenter.shared.reloadControls(ofKind: "com.pauljohnson.siteblocker.ios.LockControl")
+        }
     }
 
     /// The app came to the foreground: rebuild now, re-arm the alerts, and start the while-open timer.
     func onForeground() {
+        // The Control Center toggle can't prompt Face ID, so an unlock request lands here.
+        if MobileEnforcer.pendingUnlockRequest {
+            MobileEnforcer.pendingUnlockRequest = false
+            Task { await unlock() }
+        }
         reevaluate()
         Self.scheduleAllowanceNotifications()
         tick?.invalidate()

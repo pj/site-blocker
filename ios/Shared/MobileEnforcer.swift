@@ -66,6 +66,14 @@ enum MobileEnforcer {
         unlockedSince = on ? Date() : nil
     }
 
+    /// Set by the Control Center toggle when the user asks to unlock (which needs Face ID and so
+    /// can't happen in the control's background process). The app consumes it on next foreground and
+    /// runs the unlock flow.
+    static var pendingUnlockRequest: Bool {
+        get { defaults?.bool(forKey: "pendingUnlock") ?? false }
+        set { defaults?.set(newValue, forKey: "pendingUnlock") }
+    }
+
     /// Charge wall-clock time elapsed since the unlocked stretch began into today's budget, and
     /// advance the marker. Called on every re-evaluation so the budget stays current (and persists
     /// even if the app is killed mid-stretch). No-op while locked.
