@@ -108,6 +108,18 @@ enum MobileEnforcer {
         !engine().unlockableRules(in: context()).isEmpty
     }
 
+    /// True when some no-limit list's window is open, so its sites are accessible without any unlock
+    /// (the macOS "open access" state).
+    static func openAccessActive(now: Date = Date()) -> Bool {
+        engine().eligibleRules(in: context(now: now)).contains { $0.dailyLimit == nil }
+    }
+
+    /// Whether anything is currently open — manually unlocked, or a no-limit window is open. Drives
+    /// the Control Center toggle's on-state, matching how the Mac shows "unlocked" on open-access days.
+    static func accessOpenNow(now: Date = Date()) -> Bool {
+        isUnlocked || openAccessActive(now: now)
+    }
+
     /// Today's shared daily-limit budget across the enabled time-limited lists, for the on-screen
     /// readout. `limit` is the overall cap (the largest per-list limit, since they share one pool);
     /// `remaining` is what's left of it. `nil` when no enabled list has a daily limit.
