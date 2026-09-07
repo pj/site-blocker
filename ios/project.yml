@@ -127,6 +127,7 @@ targets:
     sources:
       - path: Tests
       - path: Shared/MobileRule.swift
+      - path: Shared/SiteList.swift
     dependencies:
       - package: RulesEngine
     settings:

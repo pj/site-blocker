@@ -1,10 +1,10 @@
 import SwiftUI
 import RulesEngine
-import UniformTypeIdentifiers
 
+/// Top level: a list of **site lists**. Each drills down to an editor with the list's domains, its
+/// default, and an ordered sublist of Allow/Deny **rules** (first active rule wins).
 struct ContentView: View {
     @EnvironmentObject private var store: MobileStore
-    @State private var editing: MobileRule?
     @AppStorage("configURL") private var configURL = ""
     @State private var importing = false
     @State private var importStatus: String?
@@ -16,91 +16,27 @@ struct ContentView: View {
                 Section {
                     lockRow
                     budgetLine
-                } footer: {
-                    Text(footerText)
+                } footer: { Text(lockFooter) }
+
+                Section("Site lists") {
+                    ForEach($store.lists) { $list in
+                        NavigationLink { ListEditView(list: $list) } label: { ListRow(list: list) }
+                    }
+                    .onDelete { $0.map { store.lists[$0] }.forEach(store.delete) }
+                    .onMove { store.moveLists(from: $0, to: $1) }
+
+                    Button { store.addList() } label: { Label("Add List", systemImage: "plus") }
                 }
 
-                Section("Blocked sites") {
-                    ForEach(store.rules) { rule in
-                        Button { editing = rule } label: { RuleRow(rule: rule) }
-                            .tint(.primary)
-                    }
-                    .onDelete { $0.map { store.rules[$0] }.forEach(store.delete) }
-
-                    Button { store.add() } label: {
-                        Label("Add List", systemImage: "plus")
-                    }
-                }
-
-                Section {
-                    TextField("Config URL", text: $configURL,
-                              prompt: Text("https://…/siteblocker-config.json"))
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                    Button { runImport() } label: {
-                        HStack {
-                            Text("Import from URL")
-                            Spacer()
-                            if importing { ProgressView() }
-                        }
-                    }
-                    .disabled(configURL.isEmpty || importing)
-                    if let importStatus {
-                        Text(importStatus).font(.caption)
-                            .foregroundStyle(importFailed ? .red : .secondary)
-                    }
-                } header: {
-                    Text("Sync")
-                } footer: {
-                    Text("Importing replaces your lists with the shared config published from your Mac — including each list's days, time window, and Face-ID gating.")
-                }
+                syncSection
             }
             .navigationTitle("SiteBlocker")
-            .sheet(item: $editing) { rule in
-                RuleEditor(rule: rule).environmentObject(store)
-            }
+            .toolbar { EditButton() }
         }
     }
 
-    /// Footer under the lock control, tuned to the current unlock state.
-    private var footerText: String {
-        if store.isUnlocked {
-            return "Unlocked — your time-limited lists are open. They re-lock when the budget is spent or the window ends."
-        }
-        if store.canUnlock {
-            return "Lists open automatically during their window. Time-limited lists can be unlocked now with Face ID."
-        }
-        return "Lists open automatically during their window. Nothing to unlock right now."
-    }
+    // MARK: Lock control
 
-    /// Daily-limit readout: how much of today's shared budget is left for the time-limited lists.
-    /// Shown only when at least one list has a daily limit.
-    @ViewBuilder private var budgetLine: some View {
-        if let budget = store.budget {
-            if budget.remaining <= 0 {
-                Label("Daily limit reached", systemImage: "hourglass")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else {
-                Label("Daily limit: \(Self.duration(budget.remaining)) left of \(Self.duration(budget.limit))",
-                      systemImage: "hourglass")
-                    .font(.callout).foregroundStyle(store.isUnlocked ? .green : .secondary)
-            }
-        }
-    }
-
-    /// A whole-minute duration, rounded up so a partial minute never reads "0m".
-    private static func duration(_ seconds: TimeInterval) -> String {
-        var mins = Int(seconds / 60)
-        if seconds.truncatingRemainder(dividingBy: 60) > 0 { mins += 1 }
-        let h = mins / 60, m = mins % 60
-        if h == 0 { return "\(m)m" }
-        if m == 0 { return "\(h)h" }
-        return "\(h)h \(m)m"
-    }
-
-    /// The single manual control: unlock the Face-ID-gated lists (during their window) or re-lock.
-    /// Unlock is disabled when nothing is currently unlockable; the schedule handles everything else.
     private var lockRow: some View {
         HStack {
             if store.isUnlocked {
@@ -110,9 +46,46 @@ struct ContentView: View {
             } else {
                 Label("Locked", systemImage: "lock.fill").foregroundStyle(.secondary)
                 Spacer()
-                Button("Unlock") { Task { await store.unlock() } }
-                    .disabled(!store.canUnlock)
+                Button("Unlock") { Task { await store.unlock() } }.disabled(!store.canUnlock)
             }
+        }
+    }
+
+    @ViewBuilder private var budgetLine: some View {
+        if let budget = store.budget {
+            if budget.remaining <= 0 {
+                Label("Daily limit reached", systemImage: "hourglass")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                Label("Daily limit: \(Self.minutes(budget.remaining)) left of \(Self.minutes(budget.limit))",
+                      systemImage: "hourglass")
+                    .font(.callout).foregroundStyle(store.isUnlocked ? .green : .secondary)
+            }
+        }
+    }
+
+    private var lockFooter: String {
+        if store.isUnlocked { return "Unlocked — limited lists are open until the budget is spent." }
+        if store.canUnlock { return "A limited list can be unlocked now with Face ID." }
+        return "Lists follow their rules. Nothing to unlock right now."
+    }
+
+    // MARK: Sync
+
+    private var syncSection: some View {
+        Section {
+            TextField("Config URL", text: $configURL,
+                      prompt: Text("https://…/siteblocker-config.json"))
+                .autocorrectionDisabled().textInputAutocapitalization(.never).keyboardType(.URL)
+            Button { runImport() } label: {
+                HStack { Text("Import from URL"); Spacer(); if importing { ProgressView() } }
+            }
+            .disabled(configURL.isEmpty || importing)
+            if let importStatus {
+                Text(importStatus).font(.caption).foregroundStyle(importFailed ? .red : .secondary)
+            }
+        } header: { Text("Sync") } footer: {
+            Text("Importing replaces your lists with the shared config from your Mac (each becomes a list with one Allow rule).")
         }
     }
 
@@ -125,67 +98,140 @@ struct ContentView: View {
             defer { importing = false }
             do {
                 try await store.importConfig(from: url)
-                importStatus = "Imported \(store.rules.count) lists."; importFailed = false
+                importStatus = "Imported \(store.lists.count) lists."; importFailed = false
             } catch {
                 importStatus = "Failed: \(error.localizedDescription)"; importFailed = true
             }
         }
     }
+
+    static func minutes(_ seconds: TimeInterval) -> String {
+        var mins = Int(seconds / 60)
+        if seconds.truncatingRemainder(dividingBy: 60) > 0 { mins += 1 }
+        let h = mins / 60, m = mins % 60
+        if h == 0 { return "\(m)m" }
+        if m == 0 { return "\(h)h" }
+        return "\(h)h \(m)m"
+    }
 }
 
-private struct RuleRow: View {
-    let rule: MobileRule
+// MARK: - Rows
+
+private struct ListRow: View {
+    let list: SiteList
     var body: some View {
         HStack {
-            Circle()
-                .fill(rule.isEnabled ? Color.green : Color.secondary)
-                .frame(width: 8, height: 8)
+            Circle().fill(list.isEnabled ? Color.green : Color.secondary).frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 2) {
-                Text(rule.name.isEmpty ? "Untitled" : rule.name)
-                Text("\(rule.siteCountSummary) · \(rule.scheduleSummary)")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(list.name.isEmpty ? "Untitled" : list.name)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+    private var subtitle: String {
+        let sites = "\(list.domains.count) site\(list.domains.count == 1 ? "" : "s")"
+        let rules = "\(list.rules.count) rule\(list.rules.count == 1 ? "" : "s")"
+        return "\(sites) · \(rules) · default \(list.defaultAllowed ? "Allowed" : "Blocked")"
+    }
+}
+
+// MARK: - List editor
+
+private struct ListEditView: View {
+    @Binding var list: SiteList
+    @State private var domainsText = ""
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("Name", text: $list.name)
+                Toggle("Enabled", isOn: $list.isEnabled)
+                Picker("When no rule matches", selection: $list.defaultAllowed) {
+                    Text("Blocked").tag(false)
+                    Text("Allowed").tag(true)
+                }
+            }
+
+            Section {
+                ForEach($list.rules) { $rule in
+                    NavigationLink { RuleEditView(rule: $rule) } label: { RuleSummaryRow(rule: rule) }
+                }
+                .onDelete { list.rules.remove(atOffsets: $0) }
+                .onMove { list.rules.move(fromOffsets: $0, toOffset: $1) }
+                Button { list.rules.append(ListRule()) } label: { Label("Add Rule", systemImage: "plus") }
+            } header: {
+                Text("Rules (first active rule wins)")
+            } footer: {
+                Text("Checked top to bottom; the first rule active right now decides. If none match, the default applies.")
+            }
+
+            Section {
+                TextEditor(text: $domainsText)
+                    .frame(minHeight: 140).autocorrectionDisabled()
+                    .textInputAutocapitalization(.never).font(.body.monospaced())
+            } header: { Text("Websites") } footer: {
+                Text("One domain per line, or hosts format. # ! ; comments are handled.")
+            }
+        }
+        .navigationTitle(list.name.isEmpty ? "List" : list.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { EditButton() }
+        .onAppear { domainsText = list.domains.joined(separator: "\n") }
+        .onChange(of: domainsText) { newValue in list.domains = SiteRuleset.parse(newValue) }
+    }
+}
+
+private struct RuleSummaryRow: View {
+    let rule: ListRule
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: rule.action == .allow ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundStyle(rule.action == .allow ? .green : .red)
+                .opacity(rule.isEnabled ? 1 : 0.35)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(rule.action == .allow ? "Allow" : "Deny").font(.body)
+                Text(RuleFormat.schedule(rule)).font(.caption).foregroundStyle(.secondary)
             }
         }
     }
 }
 
-/// Editor for one named list: the domains, plus the allow schedule (days + optional time window)
-/// and optional Face-ID gating — matching the macOS rule model.
-private struct RuleEditor: View {
-    @EnvironmentObject private var store: MobileStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var rule: MobileRule
-    @State private var sitesText: String
-    @State private var showFileImporter = false
-    @State private var showURLPrompt = false
-    @State private var urlText = ""
-    @State private var importing = false
-    @State private var importError: String?
+// MARK: - Rule editor
 
-    init(rule: MobileRule) {
-        _rule = State(initialValue: rule)
-        _sitesText = State(initialValue: rule.siteDomains.joined(separator: "\n"))
-    }
+private struct RuleEditView: View {
+    @Binding var rule: ListRule
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("Name", text: $rule.name)
-                    Toggle("Enabled", isOn: $rule.isEnabled)
+        Form {
+            Section {
+                Picker("Action", selection: $rule.action) {
+                    Text("Allow").tag(RuleAction.allow)
+                    Text("Deny").tag(RuleAction.deny)
                 }
+                .pickerStyle(.segmented)
+                Toggle("Enabled", isOn: $rule.isEnabled)
+            } footer: {
+                Text(rule.action == .allow ? "Allow these sites while this rule is active."
+                                           : "Block these sites while this rule is active.")
+            }
 
-                Section {
-                    DaysPicker(days: $rule.days)
-                    Toggle("Time of day", isOn: $rule.timeEnabled)
-                    if rule.timeEnabled {
-                        HStack {
-                            DatePicker("From", selection: minutesBinding(\.startMinutes),
-                                       displayedComponents: .hourAndMinute)
-                            DatePicker("To", selection: minutesBinding(\.endMinutes),
-                                       displayedComponents: .hourAndMinute)
-                        }
+            Section {
+                DaysPicker(days: $rule.days)
+                Toggle("Time of day", isOn: $rule.timeEnabled)
+                if rule.timeEnabled {
+                    HStack {
+                        DatePicker("From", selection: minutesBinding(\.startMinutes),
+                                   displayedComponents: .hourAndMinute)
+                        DatePicker("To", selection: minutesBinding(\.endMinutes),
+                                   displayedComponents: .hourAndMinute)
                     }
+                }
+            } header: { Text("Applies on") } footer: {
+                Text("No days selected = the rule never applies.")
+            }
+
+            if rule.action == .allow {
+                Section {
                     Toggle("Daily limit (Face ID)", isOn: Binding(
                         get: { rule.dailyLimitMinutes != nil },
                         set: { rule.dailyLimitMinutes = $0 ? (rule.dailyLimitMinutes ?? 30) : nil }))
@@ -194,77 +240,15 @@ private struct RuleEditor: View {
                             get: { minutes },
                             set: { rule.dailyLimitMinutes = $0 }), in: 5...240, step: 5)
                     }
-                } header: {
-                    Text("Schedule")
                 } footer: {
-                    Text(scheduleFooter)
-                }
-
-                Section {
-                    TextEditor(text: $sitesText)
-                        .frame(minHeight: 160)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .font(.body.monospaced())
-                    HStack {
-                        Button { showFileImporter = true } label: { Label("Import file", systemImage: "doc") }
-                        Spacer()
-                        Button { urlText = ""; showURLPrompt = true } label: { Label("Import URL", systemImage: "link") }
-                        if importing { ProgressView().padding(.leading, 6) }
-                    }
-                    .font(.callout)
-                    if let importError {
-                        Text(importError).font(.caption).foregroundStyle(.red)
-                    }
-                } header: {
-                    Text("Websites")
-                } footer: {
-                    Text("One domain per line, or import a list from a file or URL — hosts format and # ! ; comments are handled. Blocks in Safari (and in-app Safari views).")
-                }
-            }
-            .navigationTitle("Blocked List")
-            .navigationBarTitleDisplayMode(.inline)
-            .fileImporter(isPresented: $showFileImporter,
-                          allowedContentTypes: [.plainText, .text, .commaSeparatedText, .data]) { result in
-                if case .success(let url) = result { importFile(url) }
-            }
-            .alert("Import from URL", isPresented: $showURLPrompt) {
-                TextField("https://example.com/blocklist.txt", text: $urlText)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button("Cancel", role: .cancel) {}
-                Button("Import") { importURL() }
-            } message: {
-                Text("A text file of domains — one per line, or hosts format.")
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        rule.siteDomains = SiteRuleset.parse(sitesText)
-                        store.update(rule)
-                        dismiss()
-                    }
+                    Text("With a limit, these sites need a Face ID unlock and stay open until the shared daily budget is spent.")
                 }
             }
         }
+        .navigationTitle(rule.action == .allow ? "Allow rule" : "Deny rule")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
-    /// Explains the current schedule state in plain English so the allow-model isn't surprising.
-    private var scheduleFooter: String {
-        if rule.days.isEmpty {
-            return "No days selected — these sites are always blocked. Select the days they're allowed."
-        }
-        var text = "On the selected days"
-        text += rule.timeEnabled ? " during the time window" : " (all day)"
-        if let minutes = rule.dailyLimitMinutes {
-            text += ", these sites need a Face ID unlock and stay open for up to \(minutes) min/day; blocked otherwise."
-        } else {
-            text += ", these sites are open automatically; blocked otherwise. Turn on Daily limit to require Face ID."
-        }
-        return text
-    }
-
-    /// Bridges minutes-since-midnight to the Date a `DatePicker(.hourAndMinute)` wants.
     private func minutesBinding(_ keyPath: WritableKeyPath<TimeWindow, Int>) -> Binding<Date> {
         Binding {
             Calendar.current.startOfDay(for: Date())
@@ -274,49 +258,34 @@ private struct RuleEditor: View {
             rule.window[keyPath: keyPath] = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         }
     }
+}
 
-    /// Merge imported domains into the text area (parsed + de-duplicated against what's there).
-    private func appendDomains(_ domains: [String]) {
-        let existing = SiteRuleset.parse(sitesText)
-        let merged = existing + domains.filter { !existing.contains($0) }
-        sitesText = merged.joined(separator: "\n")
+// MARK: - Shared bits
+
+/// Human-readable schedule summary for a rule row.
+enum RuleFormat {
+    static func schedule(_ rule: ListRule) -> String {
+        var parts: [String] = [days(rule.days)]
+        if rule.timeEnabled {
+            parts.append("\(clock(rule.window.startMinutes))–\(clock(rule.window.endMinutes))")
+        }
+        if let m = rule.dailyLimitMinutes { parts.append("\(m) min/day") }
+        if !rule.isEnabled { parts.append("(off)") }
+        return parts.joined(separator: " · ")
     }
-
-    private func importFile(_ url: URL) {
-        importError = nil
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        do {
-            appendDomains(SiteRuleset.parse(try String(contentsOf: url, encoding: .utf8)))
-        } catch {
-            importError = "Couldn't read file: \(error.localizedDescription)"
-        }
+    private static func days(_ set: Set<Weekday>) -> String {
+        if set.isEmpty { return "never" }
+        if set == Set(Weekday.allCases) { return "every day" }
+        return Weekday.allCases.filter(set.contains).map(\.shortLabel).joined(separator: ", ")
     }
-
-    private func importURL() {
-        let trimmed = urlText.trimmingCharacters(in: .whitespaces)
-        guard let url = URL(string: trimmed), url.scheme == "http" || url.scheme == "https" else {
-            importError = "Enter a valid http(s) URL."
-            return
-        }
-        importError = nil
-        importing = true
-        Task { @MainActor in
-            defer { importing = false }
-            do {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                appendDomains(SiteRuleset.parse(String(decoding: data, as: UTF8.self)))
-            } catch {
-                importError = "Download failed: \(error.localizedDescription)"
-            }
-        }
+    private static func clock(_ minutes: Int) -> String {
+        String(format: "%02d:%02d", minutes / 60, minutes % 60)
     }
 }
 
-/// Seven letter toggles, like Screen Time's day picker. All selected = every day; none = never.
+/// Seven letter toggles, like Screen Time's day picker.
 private struct DaysPicker: View {
     @Binding var days: Set<Weekday>
-
     var body: some View {
         HStack(spacing: 6) {
             ForEach(Weekday.allCases, id: \.self) { day in
@@ -333,10 +302,8 @@ private struct DaysPicker: View {
                 .accessibilityLabel(day.shortLabel)
             }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity).padding(.vertical, 4)
     }
-
     private func toggle(_ day: Weekday) {
         if days.contains(day) { days.remove(day) } else { days.insert(day) }
     }

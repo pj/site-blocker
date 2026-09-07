@@ -1,15 +1,13 @@
 import Foundation
 import RulesEngine
 
-/// Site-blocking enforcement for the app. Owns the shared rule storage, the paused flag, and the
-/// Face-ID unlock state, and rebuilds the Safari content-blocker ruleset from whatever is blocked
-/// *right now*.
+/// Site-blocking enforcement for the app. Owns the shared list storage, the unlock state + daily
+/// usage budget, and rebuilds the Safari content-blocker ruleset from whatever is blocked *right
+/// now* — resolving each `SiteList`'s ordered rules against the current moment (see `Blocking`).
 ///
-/// A Safari content blocker is a static ruleset with no per-request time logic, so the app evaluates
-/// the allow schedule against the current moment (via the shared `BlockEngine`) and rewrites the
-/// ruleset. `reevaluate()` runs on edits, on pause/resume, on lock/unlock, on foreground, on a timer
-/// while the app is open, and on background refresh — so a window boundary takes effect the next
-/// time the app wakes, not to the minute in the background.
+/// A Safari content blocker is static, so `reevaluate()` recomputes the blocked set and rewrites the
+/// ruleset on every wake (launch, foreground, a timer while open, background refresh) — a schedule
+/// boundary takes effect the next time the app runs, not to the minute in the background.
 enum MobileEnforcer {
     static let appGroup = "group.com.pauljohnson.siteblocker"
 
@@ -19,23 +17,33 @@ enum MobileEnforcer {
     }
     private static var calendar: Calendar { .current }
 
-    // MARK: Shared rule storage
+    // MARK: List storage (lists.json; migrates the legacy [MobileRule] rules.json once)
 
-    static func loadRules() -> [MobileRule] {
-        guard let url = container?.appendingPathComponent("rules.json"),
-              let data = try? Data(contentsOf: url) else { return [] }
-        return (try? JSONDecoder().decode([MobileRule].self, from: data)) ?? []
+    static func loadLists() -> [SiteList] {
+        if let url = container?.appendingPathComponent("lists.json"),
+           let data = try? Data(contentsOf: url),
+           let lists = try? JSONDecoder().decode([SiteList].self, from: data) {
+            return lists
+        }
+        if let url = container?.appendingPathComponent("rules.json"),
+           let data = try? Data(contentsOf: url),
+           let legacy = try? JSONDecoder().decode([MobileRule].self, from: data) {
+            let migrated = legacy.map(SiteList.init(migrating:))
+            saveLists(migrated)
+            return migrated
+        }
+        return []
     }
 
-    static func saveRules(_ rules: [MobileRule]) {
-        guard let url = container?.appendingPathComponent("rules.json") else { return }
-        if let data = try? JSONEncoder().encode(rules) { try? data.write(to: url) }
+    static func saveLists(_ lists: [SiteList]) {
+        guard let url = container?.appendingPathComponent("lists.json") else { return }
+        if let data = try? JSONEncoder().encode(lists) { try? data.write(to: url) }
     }
 
-    // MARK: Face-ID unlock state + daily usage budget
+    // MARK: Unlock state + daily usage budget
 
-    /// When the gated lists are currently unlocked, the instant the current unlocked stretch began;
-    /// `nil` when locked. Wall-clock time since then is charged to today's usage budget.
+    /// When unlocked, the instant the current unlocked stretch began; `nil` when locked. Wall-clock
+    /// time since then is charged to today's usage budget.
     private static var unlockedSince: Date? {
         get { defaults?.object(forKey: "unlockedSince") as? Date }
         set {
@@ -45,7 +53,7 @@ enum MobileEnforcer {
     }
 
     /// The shared pool of unlocked time spent per day (mirrors the macOS budget). Persisted in the
-    /// App Group so it survives app restarts and the content-blocker extension can't reset it.
+    /// App Group so it survives app restarts.
     private static var usage: DailyUsage {
         get {
             guard let data = defaults?.data(forKey: "usage"),
@@ -67,8 +75,7 @@ enum MobileEnforcer {
     }
 
     /// Charge wall-clock time elapsed since the unlocked stretch began into today's budget, and
-    /// advance the marker. Called on every re-evaluation so the budget stays current (and persists
-    /// even if the app is killed mid-stretch). No-op while locked.
+    /// advance the marker. Called on every re-evaluation so the budget stays current. No-op locked.
     static func chargeUsage(now: Date = Date()) {
         guard let since = unlockedSince else { return }
         var store = usage
@@ -79,50 +86,37 @@ enum MobileEnforcer {
     }
 
     /// Total unlocked time spent today, including the in-progress stretch.
-    private static func unblockedTimeToday(now: Date = Date()) -> TimeInterval {
+    static func unblockedTimeToday(now: Date = Date()) -> TimeInterval {
         var total = usage.total(on: now)
         if let since = unlockedSince { total += max(0, now.timeIntervalSince(since)) }
         return total
     }
 
-    private static func context(now: Date = Date()) -> RuleContext {
-        RuleContext(now: now, calendar: calendar, unblockedTimeToday: unblockedTimeToday(now: now))
-    }
-
     // MARK: Evaluation
 
-    private static func engine() -> BlockEngine {
-        BlockEngine(rules: loadRules().map(\.asRule))
+    static func blockedDomainsNow(now: Date = Date()) -> [String] {
+        Blocking.blockedDomains(loadLists(), now: now, calendar: calendar,
+                                unlocked: isUnlocked, usedToday: unblockedTimeToday(now: now))
     }
 
-    /// The domains blocked at this instant: the engine's blocked set for the current time, unlock
-    /// state, and budget (no-limit lists open in their windows; limited lists open only while
-    /// unlocked and until their budget is spent).
-    static func blockedDomainsNow() -> [String] {
-        engine().blockedPatterns(unlocked: isUnlocked, in: context()).map(\.domain)
+    /// True when unlocking would open at least one list (a limited Allow rule is active with budget).
+    static func canUnlockNow(now: Date = Date()) -> Bool {
+        Blocking.canUnlock(loadLists(), now: now, calendar: calendar,
+                           usedToday: unblockedTimeToday(now: now))
     }
 
-    /// True when some limited list's window is open and its budget isn't yet spent — i.e. unlocking
-    /// would reveal something. Drives whether the Unlock control is offered.
-    static func canUnlockNow() -> Bool {
-        !engine().unlockableRules(in: context()).isEmpty
-    }
-
-    /// True when some no-limit list's window is open, so its sites are accessible without any unlock
-    /// (the macOS "open access" state).
+    /// True when some list is open via a no-limit Allow rule (auto-open, no unlock needed).
     static func openAccessActive(now: Date = Date()) -> Bool {
-        engine().eligibleRules(in: context(now: now)).contains { $0.dailyLimit == nil }
+        Blocking.openAccessActive(loadLists(), now: now, calendar: calendar)
     }
 
-    /// Whether anything is currently open — manually unlocked, or a no-limit window is open. Drives
-    /// the Control Center toggle's on-state, matching how the Mac shows "unlocked" on open-access days.
+    /// Whether anything is currently open — manually unlocked, or an auto-open Allow rule is active.
+    /// Drives the Control Center toggle's on-state.
     static func accessOpenNow(now: Date = Date()) -> Bool {
         isUnlocked || openAccessActive(now: now)
     }
 
-    /// Today's shared daily-limit budget across the enabled time-limited lists, for the on-screen
-    /// readout. `limit` is the overall cap (the largest per-list limit, since they share one pool);
-    /// `remaining` is what's left of it. `nil` when no enabled list has a daily limit.
+    /// Today's shared daily-limit budget across the enabled limited Allow rules, for the readout.
     struct BudgetStatus: Equatable, Sendable {
         var used: TimeInterval
         var limit: TimeInterval
@@ -130,37 +124,8 @@ enum MobileEnforcer {
     }
 
     static func budgetStatus(now: Date = Date()) -> BudgetStatus? {
-        let limits = loadRules().filter(\.isEnabled).compactMap(\.dailyLimitMinutes)
-        guard let maxMinutes = limits.max() else { return nil }
-        return BudgetStatus(used: unblockedTimeToday(now: now),
-                            limit: TimeInterval(maxMinutes * 60))
-    }
-
-    /// The current allow state and the next moment it flips — drives the "time left" readout.
-    /// `openNow` is whether any enabled list's window is open right now; `boundary` is when the
-    /// current window next closes (if open now) or when the next window opens (if closed now); `nil`
-    /// when it won't change within the search horizon — an always-open list, or nothing scheduled.
-    struct AllowanceStatus: Equatable, Sendable {
-        var openNow: Bool
-        var boundary: Date?
-    }
-
-    static func allowanceStatus(now: Date = Date()) -> AllowanceStatus {
-        let rules = loadRules().map(\.asRule)
-        func openAt(_ instant: Date) -> Bool {
-            // Window-based (ignores the budget) so the readout tracks the schedule, not time spent.
-            let context = RuleContext(now: instant, calendar: calendar)
-            return rules.contains { $0.windowOpen(in: context) }
-        }
-        let openNow = openAt(now)
-        // Windows repeat weekly, so any flip happens within a week; scan 8 days at one-minute steps.
-        for minute in 1...(8 * 24 * 60) {
-            let instant = now.addingTimeInterval(TimeInterval(minute * 60))
-            if openAt(instant) != openNow {
-                return AllowanceStatus(openNow: openNow, boundary: instant)
-            }
-        }
-        return AllowanceStatus(openNow: openNow, boundary: nil)
+        guard let minutes = Blocking.budgetLimitMinutes(loadLists()) else { return nil }
+        return BudgetStatus(used: unblockedTimeToday(now: now), limit: TimeInterval(minutes * 60))
     }
 
     /// Recompute the blocked domain set and rewrite the Safari ruleset.
