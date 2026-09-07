@@ -32,17 +32,3 @@ extension Condition {
         String(format: "%02d:%02d", minutes / 60, minutes % 60)
     }
 }
-
-extension Weekday {
-    var shortName: String {
-        switch self {
-        case .sunday: return "Sun"
-        case .monday: return "Mon"
-        case .tuesday: return "Tue"
-        case .wednesday: return "Wed"
-        case .thursday: return "Thu"
-        case .friday: return "Fri"
-        case .saturday: return "Sat"
-        }
-    }
-}

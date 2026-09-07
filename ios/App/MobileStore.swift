@@ -29,18 +29,25 @@ final class MobileStore: ObservableObject {
     @Published private(set) var canUnlock: Bool = MobileEnforcer.canUnlockNow()
     /// Today's shared daily-limit budget, for the on-screen readout. `nil` when nothing is limited.
     @Published private(set) var budget: MobileEnforcer.BudgetStatus? = MobileEnforcer.budgetStatus()
+    /// The lists blocked right now, for the live status dot/tint on each row.
+    @Published private(set) var blockedListIDs: Set<UUID> = MobileEnforcer.blockedListIDs()
 
     /// Fires while foregrounded so a schedule boundary crossed with the app open takes effect promptly.
     private var tick: Timer?
 
+    /// Last time each remote-sourced list was fetched, to throttle re-fetches.
+    private var remoteLastFetch: [UUID: Date] = [:]
+    private let remoteRefreshInterval: TimeInterval = 4 * 3600
+
     init() {
         lists = MobileEnforcer.loadLists()
         reevaluate()
+        resolveRemoteSources()
     }
 
     // MARK: List CRUD (the editor commits a whole list, including its ordered rules)
 
-    func addList() { lists.append(SiteList(name: "New List")) }
+    func addList() { lists.append(SiteList(name: "New List", rules: [SiteList.defaultRule()])) }
     func delete(_ list: SiteList) { lists.removeAll { $0.id == list.id } }
     func update(_ list: SiteList) {
         guard let idx = lists.firstIndex(where: { $0.id == list.id }) else { return }
@@ -61,41 +68,34 @@ final class MobileStore: ObservableObject {
         let (data, _) = try await URLSession.shared.data(for: request)
         let config = try JSONDecoder().decode(SyncedConfig.self, from: data)
 
-        var mirrored: [SiteList] = []
-        for rule in config.rules {
-            var domains = rule.domains
-            if let string = rule.blocklistUrl, let listURL = URL(string: string),
-               let (listData, _) = try? await URLSession.shared.data(from: listURL) {
-                domains += SiteRuleset.parse(String(decoding: listData, as: UTF8.self))
+        // Keep remote sources; they're fetched live below and refreshed on foreground.
+        lists = config.toSiteLists()
+        resolveRemoteSources(force: true)
+    }
+
+    // MARK: Remote source resolution
+
+    /// Fetch each remote-sourced list's blocklist and store it as the list's targets, throttled to
+    /// `remoteRefreshInterval`. iOS has no background scheduler for this, so it runs on import and on
+    /// foreground; the last fetched targets are persisted so blocking works between fetches.
+    func resolveRemoteSources(force: Bool = false) {
+        for list in lists {
+            guard case .remote(let url) = list.source else { continue }
+            let due = force || remoteLastFetch[list.id]
+                .map { Date().timeIntervalSince($0) > remoteRefreshInterval } ?? true
+            guard due else { continue }
+            remoteLastFetch[list.id] = Date()
+            let id = list.id
+            Task { [weak self] in
+                guard let (data, _) = try? await URLSession.shared.data(from: url) else { return }
+                let hosts = SiteRuleset.parse(String(decoding: data, as: UTF8.self)).map { HostPattern($0) }
+                await MainActor.run {
+                    guard let self, let idx = self.lists.firstIndex(where: { $0.id == id }),
+                          self.lists[idx].targets != hosts else { return }
+                    self.lists[idx].targets = hosts   // didSet persists + re-evaluates
+                }
             }
-            mirrored.append(makeList(from: rule,
-                                     domains: SiteRuleset.parse(domains.joined(separator: "\n"))))
         }
-        lists = mirrored
-    }
-
-    private func makeList(from synced: SyncedConfig.SyncedRule, domains: [String]) -> SiteList {
-        var list = SiteList(name: synced.name)
-        list.isEnabled = synced.enabled
-        list.domains = domains
-        list.defaultAllowed = false
-        var r = ListRule()
-        r.action = .allow
-        r.days = synced.days.map { Set($0.compactMap(Weekday.init(abbreviation:))) } ?? Set(Weekday.allCases)
-        if let window = synced.window,
-           let start = Self.minutes(window.start), let end = Self.minutes(window.end) {
-            r.timeEnabled = true
-            r.window = TimeWindow(startMinutes: start, endMinutes: end)
-        }
-        r.dailyLimitMinutes = synced.dailyLimitMinutes
-        list.rules = [r]
-        return list
-    }
-
-    private static func minutes(_ hhmm: String) -> Int? {
-        let parts = hhmm.split(separator: ":")
-        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) else { return nil }
-        return h * 60 + m
     }
 
     // MARK: Lock / unlock
@@ -130,8 +130,12 @@ final class MobileStore: ObservableObject {
         isUnlocked = MobileEnforcer.isUnlocked
         canUnlock = MobileEnforcer.canUnlockNow()
         budget = MobileEnforcer.budgetStatus()
+        blockedListIDs = MobileEnforcer.blockedListIDs()
         reloadControl()
     }
+
+    /// The rule currently deciding `list` (drives the "active now" marker in the rule editor).
+    func activeRuleID(for list: SiteList) -> UUID? { MobileEnforcer.activeRuleID(for: list) }
 
     /// Refresh the Control Center toggle so it reflects the current state.
     private func reloadControl() {
@@ -142,6 +146,7 @@ final class MobileStore: ObservableObject {
 
     func onForeground() {
         reevaluate()
+        resolveRemoteSources()
         tick?.invalidate()
         tick = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.reevaluate() }

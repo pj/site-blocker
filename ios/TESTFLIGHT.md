@@ -7,13 +7,13 @@ This build blocks **websites in Safari** via a Content Blocker extension. It use
 Controls / Screen Time entitlement**, so there's no special Apple approval to wait on — it goes
 straight to TestFlight.
 
-Each list carries an **allow schedule** (days + optional time-of-day window) and optional **Face-ID
-gating**, mirroring the Mac. Because a Safari content blocker is a static ruleset, the app
-re-evaluates the schedule and rewrites the ruleset whenever it runs — on launch, foreground, a timer
-while open, and Background App Refresh. So a window opening or closing takes effect the next time the
-app wakes, **not to the minute in the background**. Exact-time background enforcement (and true
-time-budget limits / app blocking) would need the Family Controls distribution entitlement; see the
-git history for that path if you revisit it.
+Each **site list** carries an ordered set of **Allow/Deny rules** (days + optional time-of-day
+window + optional daily limit) plus a per-list default, resolved first-active-rule-wins — the same
+shared model as the Mac. Because a Safari content blocker is a static ruleset, the app re-evaluates
+and rewrites the ruleset whenever it runs — on launch, foreground, a timer while open, and Background
+App Refresh. So a rule turning on/off takes effect the next time the app wakes, **not to the minute
+in the background**. Exact-time background enforcement (and app blocking) would need the Family
+Controls distribution entitlement; see the git history for that path if you revisit it.
 
 Once set up, the whole update loop is:
 

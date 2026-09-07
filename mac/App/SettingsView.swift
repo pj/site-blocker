@@ -39,7 +39,7 @@ struct SettingsView: View {
             defer { importing = false }
             do {
                 try await store.importConfig(from: url)
-                status = "Imported \(store.rules.count) rules."; failed = false
+                status = "Imported \(store.lists.count) lists."; failed = false
             } catch {
                 status = "Failed: \(error.localizedDescription)"; failed = true
             }

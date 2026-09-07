@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
-"""Publish the Mac's current SiteBlocker rules to a shared JSON config (a public gist).
+"""Publish the Mac's current SiteBlocker lists to a shared JSON config (a public gist).
 
 The Mac is the source of truth; the apps' Settings → Import fetches this config and applies it.
-Reuses `gh`'s stored auth to PATCH the gist — no token handled here.
+Reuses `gh`'s stored auth to PATCH the gist — no token handled here. Emits the v2 (site-lists +
+ordered Allow/Deny rules) format.
 
 Usage:
   python3 scripts/publish-config.py --print             # build config.json, print to stdout
   CONFIG_GIST_ID=<id> python3 scripts/publish-config.py  # build + push to the gist
-
-The `--print` form is how the gist is first created:
-  python3 scripts/publish-config.py --print > /tmp/c.json
-  gh gist create /tmp/c.json --public -d "SiteBlocker synced rules"
 """
 import json, os, subprocess, sys, datetime
 
 CONFIG_FILENAME = "siteblocker-config.json"
-RULES = os.path.expanduser("~/Library/Application Support/SiteBlocker/rules.json")
+LISTS = os.path.expanduser("~/Library/Application Support/SiteBlocker/lists.json")
 WEEKDAY = {1: "sun", 2: "mon", 3: "tue", 4: "wed", 5: "thu", 6: "fri", 7: "sat"}
 
 
 def collect(cond, out):
     """Flatten a Condition into {days, window} (ignores anything else)."""
+    if not isinstance(cond, dict):
+        return
     if "onDaysOfWeek" in cond:
         out["days"] = [WEEKDAY[d] for d in sorted(cond["onDaysOfWeek"]["_0"])]
     elif "duringTimeOfDay" in cond:
@@ -33,31 +32,36 @@ def collect(cond, out):
 
 
 def rule_to_config(r):
-    source = r.get("source", {})
-    entry = {"name": r.get("name", ""), "enabled": r.get("isEnabled", True),
-             "domains": [], "blocklistUrl": None}
-    # A remote-sourced rule: sync the URL reference (not the resolved list, which can be huge) —
-    # the apps fetch the same list. File/manual rules inline their resolved domains.
+    sched = {}
+    collect(r.get("condition", {}), sched)
+    limit = r.get("dailyLimit")
+    return {
+        "action": r.get("action", "deny"),
+        "days": sched.get("days"),            # None = every day
+        "window": sched.get("window"),        # None = all day
+        "dailyLimitMinutes": round(limit / 60) if limit else None,
+    }
+
+
+def list_to_config(l):
+    source = l.get("source", {})
+    entry = {"name": l.get("name", ""), "enabled": l.get("isEnabled", True),
+             "domains": [], "blocklistUrl": None,
+             "rules": [rule_to_config(r) for r in l.get("rules", [])]}
+    # Remote-sourced lists sync the URL reference (not the resolved list); others inline their hosts.
     if "remote" in source:
         entry["blocklistUrl"] = source["remote"]["_0"]
     else:
-        entry["domains"] = [t["domain"] for t in r.get("targets", [])]
-
-    sched = {}
-    collect(r.get("condition", {}), sched)
-    entry["days"] = sched.get("days")            # None = every day
-    entry["window"] = sched.get("window")        # None = all day
-    limit = r.get("dailyLimit")
-    entry["dailyLimitMinutes"] = round(limit / 60) if limit else None
+        entry["domains"] = [t["domain"] for t in l.get("targets", [])]
     return entry
 
 
-def build_config(rules_path=RULES):
-    rules = json.load(open(rules_path))
+def build_config(lists_path=LISTS):
+    lists = json.load(open(lists_path))
     return {
-        "version": 1,
+        "version": 2,
         "updatedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "rules": [rule_to_config(r) for r in rules],
+        "lists": [list_to_config(l) for l in lists],
     }
 
 
@@ -75,7 +79,7 @@ def main():
     body = json.dumps({"files": {CONFIG_FILENAME: {"content": text}}})
     subprocess.run(["gh", "api", "-X", "PATCH", f"gists/{gist_id}", "--input", "-"],
                    input=body.encode(), check=True, stdout=subprocess.DEVNULL)
-    print(f"→ published {len(config['rules'])} rules to gist {gist_id}")
+    print(f"→ published {len(config['lists'])} lists to gist {gist_id}")
 
 
 if __name__ == "__main__":

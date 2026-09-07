@@ -3,38 +3,39 @@ import AppKit
 import OSLog
 import RulesEngine
 
-/// Unified-log logger; view with `just logs` (stream) or
-/// `/usr/bin/log show --last 1h --predicate 'subsystem == "com.pauljohnson.siteblocker"'`.
+/// Unified-log logger; view with `just logs`.
 let sourceLog = Logger(subsystem: "com.pauljohnson.siteblocker", category: "sources")
 
-/// The app-side coordinator for the allow model. Sites named by rules are blocked by default; the
-/// user *unlocks* (Touch ID) to view them, but only while some rule's day/time window is open and
-/// its daily budget isn't spent. While unlocked, each allowed rule's budget drains in wall-clock;
-/// when it runs out (or its window closes) that rule's sites re-block. Pure evaluation lives in
-/// `BlockEngine`; this type is the wiring (clock, timer, persistence, enforcement hand-off).
+/// App-side coordinator for the redesigned model. Each **site list** resolves its ordered Allow/Deny
+/// rules against the current moment (first active rule wins; see `ListEngine`). The user *unlocks*
+/// (Touch ID) to open the limited Allow rules, whose sites drain a shared daily budget while
+/// unlocked. Pure evaluation lives in `ListEngine`; this type is the wiring (clock, timer,
+/// persistence, sources, enforcement hand-off).
 @MainActor
 final class RuleStore: ObservableObject {
-    @Published var rules: [Rule] {
-        didSet { persistence.save(rules: rules, usage: usage); refresh() }
+    @Published var lists: [SiteList] {
+        didSet { persistence.save(lists: lists, usage: usage); refresh() }
     }
 
     /// Host patterns actively blocked *right now*. Drives the status view.
     @Published private(set) var blockedNow: Set<HostPattern> = []
 
-    /// Whether the sites are currently unlocked (viewable). Locked by default; **not** persisted, so
-    /// every launch starts locked/blocked — the safe default.
+    /// Whether the sites are currently unlocked. Locked by default; not persisted, so every launch
+    /// starts locked — the safe default.
     @Published private(set) var isUnlocked = false
 
-    /// Whether at least one *budgeted* rule is eligible to unlock right now (window open + budget
-    /// left). No-limit rules open automatically, so they don't count here. Drives the Unlock control.
+    /// Whether unlocking would open at least one limited list right now. Drives the Unlock control.
     @Published private(set) var canUnlock = false
 
-    /// Whether some no-limit rule's window is open right now, so its sites are available without any
-    /// unlock. Lets the UI show an "open" state even while locked.
+    /// Whether some list is open via a no-limit Allow rule (auto-open). Lets the UI show an "open"
+    /// state even while locked.
     @Published private(set) var openAccessActive = false
 
-    /// Total unblocked time used today — the shared pool all rules draw down. For the readouts.
+    /// Total unblocked time used today — the shared pool all limited rules draw down. For readouts.
     @Published private(set) var totalUsageToday: TimeInterval = 0
+
+    /// IDs of lists whose sites are blocked *right now* — for the live per-list status dot.
+    @Published private(set) var blockedListIDs: Set<UUID> = []
 
     private var usage: DailyUsage
     private let enforcer: Enforcer
@@ -42,24 +43,13 @@ final class RuleStore: ObservableObject {
     private var timer: Timer?
     private var hotKey: GlobalHotKey?
 
-    /// Set while unlocked: the moment up to which viewing time has been charged to the allowed rules.
     private var unlockedSince: Date?
-
-    /// When the Mac went to sleep while unlocked, so wake can tell a brief lid-close from a long one.
     private var sleepStart: Date?
-    /// A wake within this window of sleeping resumes the session without re-auth; longer re-locks.
     private let sleepLockGrace: TimeInterval = 5 * 60
-
-    /// The last blocked set handed to the enforcer/snapshot, so we skip rewriting the (potentially
-    /// multi-megabyte) snapshot file when nothing changed between ticks.
     private var lastBlocked: Set<HostPattern>?
-
-    /// Budget-countdown notification state for the unlock session: the last whole-minute value we
-    /// posted a 5-minute update for, and whether the final 1-minute warning has fired.
     private var lastNotifiedTotalMinutes: Int?
     private var totalWarned = false
 
-    /// Health of each rule's external target source, for the sites popover.
     struct SourceStatus: Equatable {
         var lastUpdated: Date?
         var error: String?
@@ -76,31 +66,30 @@ final class RuleStore: ObservableObject {
         self.persistence = persistence
         let loaded = persistence.load()
         self.usage = loaded.usage
-        self.rules = loaded.rules
+        self.lists = loaded.lists
         startTimer()
         registerHotKey()
         observeCloudChanges()
         observeSleepWake()
-        resolveSources(force: Set(rules.map(\.id)))
+        resolveSources(force: Set(lists.map(\.id)))
         refresh()
     }
 
-    /// React to iCloud key-value changes pushed from another device: merge them into memory (usage
-    /// by max, rules by last-writer-wins) and re-resolve any file/URL sources whose caches were
-    /// stripped for sync.
+    // MARK: iCloud + sleep/wake
+
     private func observeCloudChanges() {
         NotificationCenter.default.addObserver(
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
             object: NSUbiquitousKeyValueStore.default, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self,
-                      let merged = self.persistence.mergeFromCloud(currentRules: self.rules,
+                      let merged = self.persistence.mergeFromCloud(currentLists: self.lists,
                                                                    currentUsage: self.usage)
                 else { return }
                 self.usage = merged.usage
-                if merged.rules != self.rules {
-                    self.rules = merged.rules   // didSet persists + refreshes
-                    self.resolveSources(force: Set(self.rules.map(\.id)))
+                if merged.lists != self.lists {
+                    self.lists = merged.lists   // didSet persists + refreshes
+                    self.resolveSources(force: Set(self.lists.map(\.id)))
                 } else {
                     self.refresh()
                 }
@@ -108,10 +97,6 @@ final class RuleStore: ObservableObject {
         }
     }
 
-    /// Stop the budget from draining while the Mac sleeps (e.g. lid closed), and re-lock on wake.
-    /// Without this, the 5s timer is suspended during sleep but the next tick after wake charges the
-    /// whole sleep span (`now - unlockedSince`) — so an unlocked session left closed burns the day's
-    /// budget. NSWorkspace's sleep/wake notifications post on the main thread.
     private func observeSleepWake() {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) {
@@ -122,16 +107,12 @@ final class RuleStore: ObservableObject {
         }
     }
 
-    /// About to sleep: charge the time used while awake, then freeze the clock so sleep doesn't count.
     private func handleWillSleep() {
-        drainViewingTime()          // records awake time up to now
-        unlockedSince = nil         // freeze: no accrual while asleep
+        drainViewingTime()
+        unlockedSince = nil
         if isUnlocked { sleepStart = Date() }
     }
 
-    /// Woke up (lid reopened). A brief nap (≤ grace) resumes the session, charging from wake so the
-    /// sleep itself is free; a longer sleep re-locks so viewing time isn't spent unattended and
-    /// unlock is required again. Either way, sleep time is never charged (`unlockedSince` was nil).
     private func handleDidWake() {
         let slept = sleepStart.map { Date().timeIntervalSince($0) } ?? .infinity
         sleepStart = nil
@@ -139,13 +120,15 @@ final class RuleStore: ObservableObject {
         if slept > sleepLockGrace {
             lock()
         } else {
-            unlockedSince = Date()  // resume the clock from now
+            unlockedSince = Date()
             refresh()
         }
     }
 
+    // MARK: Evaluation
+
     /// How much of a rule's daily limit remains, measured against the shared pool. `nil` = no limit.
-    func remainingBudget(for rule: Rule) -> TimeInterval? {
+    func remainingBudget(for rule: ListRule) -> TimeInterval? {
         guard let limit = rule.dailyLimit else { return nil }
         return max(0, limit - totalUsageToday)
     }
@@ -155,24 +138,23 @@ final class RuleStore: ObservableObject {
     }
 
     /// Recompute the live blocked set, hand it to the enforcer, and refresh the shared snapshot.
-    /// Charges elapsed viewing time to the shared daily pool first, so a budget that runs out this
-    /// tick re-blocks immediately.
     func refresh() {
         drainViewingTime()
 
         let context = liveContext()
-        let engine = BlockEngine(rules: rules)
-        let eligible = engine.eligibleRules(in: context)
-        let unlockable = eligible.filter { $0.dailyLimit != nil }
+        let engine = ListEngine(lists: lists)
 
-        canUnlock = !unlockable.isEmpty
-        openAccessActive = eligible.contains { $0.dailyLimit == nil }
-        // Auto-lock once no *budgeted* rule is eligible (windows closed / budgets spent). No-limit
-        // rules open on their own, so they neither need nor keep an unlock alive.
-        if isUnlocked && unlockable.isEmpty {
+        canUnlock = engine.canUnlock(in: context)
+        openAccessActive = engine.openAccessActive(in: context)
+        // Auto-lock once nothing limited is left to unlock (windows closed / budgets spent).
+        if isUnlocked && !canUnlock {
             isUnlocked = false
             unlockedSince = nil
         }
+
+        blockedListIDs = Set(lists.filter {
+            engine.decision(for: $0, unlocked: isUnlocked, in: context) == .blocked
+        }.map(\.id))
 
         let previousBlocked = lastBlocked
         blockedNow = engine.blockedPatterns(unlocked: isUnlocked, in: context)
@@ -182,8 +164,6 @@ final class RuleStore: ObservableObject {
             persistence.writeSnapshot(PolicySnapshot(blockedPatterns: blockedNow))
         }
 
-        // Sites that just became blocked (re-lock, window closed, budget spent, launch): close any
-        // open browser tab still showing them, so an already-loaded page can't be kept reading.
         let newlyBlocked = blockedNow.subtracting(previousBlocked ?? [])
         if !newlyBlocked.isEmpty {
             TabCloser.closeTabs(blockedDomains: Set(newlyBlocked.map(\.domain)))
@@ -193,9 +173,7 @@ final class RuleStore: ObservableObject {
         if totalUsageToday != total { totalUsageToday = total }
     }
 
-    /// Charge the time since the last tick to the shared daily pool while unlocked. No-op while
-    /// locked. One pool for all rules, so it drains at wall-clock rate regardless of how many rules
-    /// are currently allowing sites — each rule re-blocks when the pool passes its own limit.
+    /// Charge the time since the last tick to the shared daily pool while unlocked. No-op locked.
     private func drainViewingTime() {
         guard isUnlocked, let since = unlockedSince else { return }
         let now = Date()
@@ -203,30 +181,17 @@ final class RuleStore: ObservableObject {
         unlockedSince = now
         guard elapsed > 0 else { return }
         usage.record(elapsed, at: now)
-        persistence.save(rules: rules, usage: usage)
+        persistence.save(lists: lists, usage: usage)
         notifyCountdown()
     }
 
-    /// Viewing time left in the current unlock session, for the menu readout. `nil` when locked or
-    /// nothing budget-limited is currently eligible.
+    /// Viewing time left in the current unlock session, for the menu readout.
     var viewingTimeRemaining: TimeInterval? {
-        isUnlocked ? sessionRemaining() : nil
+        isUnlocked ? ListEngine(lists: lists).sessionRemaining(in: liveContext()) : nil
     }
 
-    /// Viewing time left in the session: how long until every budget-limited rule has re-blocked —
-    /// the largest remaining budget in the shared pool. `nil` when nothing budget-limited is active.
-    private func sessionRemaining() -> TimeInterval? {
-        let context = liveContext()
-        let engine = BlockEngine(rules: rules)
-        return engine.eligibleRules(in: context)
-            .compactMap { rule in rule.dailyLimit.map { max(0, $0 - context.unblockedTimeToday) } }
-            .max()
-    }
-
-    /// Post a single "time remaining" update every 5 minutes, then a final warning ~1 minute before
-    /// the budget runs out. Tracks the total session time, not any one site.
     private func notifyCountdown() {
-        guard let remaining = sessionRemaining() else { return }
+        guard let remaining = ListEngine(lists: lists).sessionRemaining(in: liveContext()) else { return }
         if remaining <= 60 {
             if !totalWarned {
                 totalWarned = true
@@ -241,69 +206,61 @@ final class RuleStore: ObservableObject {
         }
     }
 
-    /// Seed the countdown so notifications track *decreases* from the current level rather than
-    /// firing at unlock.
     private func seedBudgetNotifications() {
         totalWarned = false
-        lastNotifiedTotalMinutes = sessionRemaining().map { Int(($0 / 60.0).rounded(.up)) }
+        lastNotifiedTotalMinutes = ListEngine(lists: lists).sessionRemaining(in: liveContext())
+            .map { Int(($0 / 60.0).rounded(.up)) }
     }
 
-    // MARK: Mutations
+    // MARK: List mutations
 
-    func add(_ rule: Rule) { rules.append(rule) }
-
-    func delete(_ rule: Rule) { rules.removeAll { $0.id == rule.id } }
-
-    func update(_ rule: Rule) {
-        guard let idx = rules.firstIndex(where: { $0.id == rule.id }) else { return }
-        rules[idx] = rule
+    func add(_ list: SiteList) { lists.append(list) }
+    func delete(_ list: SiteList) { lists.removeAll { $0.id == list.id } }
+    func update(_ list: SiteList) {
+        guard let idx = lists.firstIndex(where: { $0.id == list.id }) else { return }
+        lists[idx] = list
+    }
+    func move(from offsets: IndexSet, to destination: Int) {
+        lists.move(fromOffsets: offsets, toOffset: destination)
     }
 
-    /// Replace all rules with those in a shared config fetched from `url` (Settings → Import). The
-    /// config is the source of truth (published by `just publish-config`); remote/file-sourced rules
-    /// resolve their target lists on the next refresh.
+    func setEnabled(_ list: SiteList, isEnabled: Bool) {
+        guard let idx = lists.firstIndex(where: { $0.id == list.id }) else { return }
+        lists[idx].isEnabled = isEnabled
+    }
+
+    /// Flip a list's enabled flag behind Touch ID (both directions, so it stays deliberate).
+    func toggleListAuthenticated(_ list: SiteList) async {
+        let verb = list.isEnabled ? "disable" : "enable"
+        guard await Authentication.confirm(reason: "\(verb) a site list") else { return }
+        setEnabled(list, isEnabled: !list.isEnabled)
+    }
+
+    /// Delete a list behind Touch ID — otherwise deleting is an unauthenticated bypass.
+    func deleteAuthenticated(_ list: SiteList) async {
+        guard await Authentication.confirm(reason: "delete a site list") else { return }
+        delete(list)
+    }
+
+    /// Replace all lists from a shared config (Settings → Import). The legacy config format maps each
+    /// entry to a list with one Allow rule (a multi-rule sync format is a follow-up).
     func importConfig(from url: URL) async throws {
         var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData   // the gist raw URL is CDN-cached
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         let (data, _) = try await URLSession.shared.data(for: request)
         let config = try JSONDecoder().decode(SyncedConfig.self, from: data)
-        rules = config.rules.map { $0.toRule() }              // didSet persists + refreshes
-        resolveSources(force: Set(rules.map(\.id)))
-    }
-
-    func setEnabled(_ rule: Rule, isEnabled: Bool) {
-        guard let idx = rules.firstIndex(where: { $0.id == rule.id }) else { return }
-        rules[idx].isEnabled = isEnabled
-    }
-
-    /// Flip a rule's enabled flag behind Touch ID. Both directions are gated so the rules screen
-    /// stays deliberate rather than a free bypass.
-    func toggleRuleAuthenticated(_ rule: Rule) async {
-        let verb = rule.isEnabled ? "disable" : "enable"
-        guard await Authentication.confirm(reason: "\(verb) an allow rule") else { return }
-        setEnabled(rule, isEnabled: !rule.isEnabled)
-    }
-
-    /// Delete a rule behind Touch ID — otherwise deleting would be an unauthenticated way around
-    /// the gated disable.
-    func deleteAuthenticated(_ rule: Rule) async {
-        guard await Authentication.confirm(reason: "delete an allow rule") else { return }
-        delete(rule)
+        lists = config.toSiteLists()   // handles v2 (lists) and legacy v1 (rules)
+        resolveSources(force: Set(lists.map(\.id)))
     }
 
     // MARK: Lock / unlock
 
-    /// Toggle the lock. Unlocking (making sites viewable) requires Touch ID and that some rule is
-    /// eligible right now; locking is immediate.
     func toggleLock() async {
         if isUnlocked { lock() } else { await unlock() }
     }
 
-    /// Unlock the currently-allowed sites. Refused (no-op) when nothing is eligible.
     func unlock() async {
-        let context = liveContext()
-        let engine = BlockEngine(rules: rules)
-        guard !engine.unlockableRules(in: context).isEmpty else { return }
+        guard ListEngine(lists: lists).canUnlock(in: liveContext()) else { return }
         guard await Authentication.confirm(reason: "unlock the blocked sites") else { return }
         isUnlocked = true
         unlockedSince = Date()
@@ -320,112 +277,103 @@ final class RuleStore: ObservableObject {
         refresh()
     }
 
-    // MARK: Target sources
+    // MARK: Target sources (per list)
 
-    /// Point a rule at a new source. Manual sources apply immediately; file/remote kick off a
-    /// resolve so the cached targets refresh right away.
-    func setSource(_ rule: Rule, source: TargetSource) {
-        guard let idx = rules.firstIndex(where: { $0.id == rule.id }) else { return }
-        rules[idx].source = source
+    func setSource(_ list: SiteList, source: TargetSource) {
+        guard let idx = lists.firstIndex(where: { $0.id == list.id }) else { return }
+        lists[idx].source = source
         if case .manual(let hosts) = source {
-            rules[idx].targets = hosts
-            sourceStatus[rule.id] = nil
+            lists[idx].targets = hosts
+            sourceStatus[list.id] = nil
         } else {
-            resolveSources(force: [rule.id])
+            resolveSources(force: [list.id])
         }
     }
 
-    /// Bookmark a user-chosen file so the reference survives relaunches. The app is not sandboxed,
-    /// so a plain bookmark (no security scope) is all that's needed to re-read the file later.
-    func setFileSource(_ rule: Rule, url: URL) {
+    func setFileSource(_ list: SiteList, url: URL) {
         do {
             let bookmark = try url.bookmarkData(includingResourceValuesForKeys: nil, relativeTo: nil)
             sourceLog.info("Bookmarked file source \(url.path, privacy: .public)")
-            setSource(rule, source: .file(bookmark: bookmark))
+            setSource(list, source: .file(bookmark: bookmark))
         } catch {
             sourceLog.error("Bookmark failed for \(url.path, privacy: .public): \(error, privacy: .public)")
-            setStatus(rule.id, error: "Couldn't access file: \(error.localizedDescription)")
+            setStatus(list.id, error: "Couldn't access file: \(error.localizedDescription)")
         }
     }
 
-    /// Re-fetch a remote source now (the periodic refresh is hours apart).
-    func refreshSource(_ rule: Rule) {
-        resolveSources(force: [rule.id])
+    func refreshSource(_ list: SiteList) {
+        resolveSources(force: [list.id])
     }
 
-    /// The chosen file's path, for display. `nil` when the bookmark can't resolve.
-    func fileDisplayPath(for rule: Rule) -> String? {
-        guard case .file(let bookmark) = rule.source else { return nil }
+    func fileDisplayPath(for list: SiteList) -> String? {
+        guard case .file(let bookmark) = list.source else { return nil }
         var stale = false
         let url = try? URL(resolvingBookmarkData: bookmark, relativeTo: nil, bookmarkDataIsStale: &stale)
         return url?.path
     }
 
-    /// Bring file/remote-sourced target caches up to date. Files re-read when their modification
-    /// date changes (checked every refresh tick — cheap stat); remotes re-fetch every few hours.
-    /// Failures keep the cached list — a broken source should never silently unblock sites.
     private func resolveSources(force: Set<UUID> = []) {
-        for rule in rules {
-            switch rule.source {
+        for list in lists {
+            switch list.source {
             case .manual:
                 break
             case .file(let bookmark):
-                resolveFile(rule: rule, bookmark: bookmark, force: force.contains(rule.id))
+                resolveFile(list: list, bookmark: bookmark, force: force.contains(list.id))
             case .remote(let url):
-                let due = force.contains(rule.id) || remoteLastFetch[rule.id].map {
+                let due = force.contains(list.id) || remoteLastFetch[list.id].map {
                     Date().timeIntervalSince($0) > remoteRefreshInterval
                 } ?? true
-                if due { fetchRemote(rule: rule, url: url) }
+                if due { fetchRemote(list: list, url: url) }
             }
         }
     }
 
-    private func resolveFile(rule: Rule, bookmark: Data, force: Bool) {
+    private func resolveFile(list: SiteList, bookmark: Data, force: Bool) {
         do {
             var stale = false
             let url = try URL(resolvingBookmarkData: bookmark, relativeTo: nil,
                               bookmarkDataIsStale: &stale)
             if stale,
                let fresh = try? url.bookmarkData(includingResourceValuesForKeys: nil, relativeTo: nil),
-               let idx = rules.firstIndex(where: { $0.id == rule.id }) {
+               let idx = lists.firstIndex(where: { $0.id == list.id }) {
                 sourceLog.info("Refreshed stale bookmark for \(url.path, privacy: .public)")
-                rules[idx].source = .file(bookmark: fresh)
+                lists[idx].source = .file(bookmark: fresh)
             }
             let modified = try url.resourceValues(forKeys: [.contentModificationDateKey])
                 .contentModificationDate ?? Date()
-            guard force || fileModificationDates[rule.id] != modified else { return }
+            guard force || fileModificationDates[list.id] != modified else { return }
             let text = try String(contentsOf: url, encoding: .utf8)
-            fileModificationDates[rule.id] = modified
+            fileModificationDates[list.id] = modified
             let hosts = TargetImport.parse(text).map { HostPattern($0) }
             sourceLog.info("Read \(hosts.count) hosts from \(url.path, privacy: .public)")
-            applyResolvedTargets(rule.id, hosts: hosts)
+            applyResolvedTargets(list.id, hosts: hosts)
         } catch {
             sourceLog.error("File source read failed: \(error, privacy: .public)")
-            setStatus(rule.id, error: "Couldn't read file: \(error.localizedDescription)")
+            setStatus(list.id, error: "Couldn't read file: \(error.localizedDescription)")
         }
     }
 
-    private func fetchRemote(rule: Rule, url: URL) {
-        guard !remoteInFlight.contains(rule.id) else { return }
-        remoteInFlight.insert(rule.id)
-        remoteLastFetch[rule.id] = Date()
+    private func fetchRemote(list: SiteList, url: URL) {
+        guard !remoteInFlight.contains(list.id) else { return }
+        remoteInFlight.insert(list.id)
+        remoteLastFetch[list.id] = Date()
         Task { [weak self] in
             do {
                 let domains = try await TargetImport.download(from: url)
                 sourceLog.info("Fetched \(domains.count) hosts from \(url.absoluteString, privacy: .public)")
-                self?.remoteInFlight.remove(rule.id)
-                self?.applyResolvedTargets(rule.id, hosts: domains.map { HostPattern($0) })
+                self?.remoteInFlight.remove(list.id)
+                self?.applyResolvedTargets(list.id, hosts: domains.map { HostPattern($0) })
             } catch {
                 sourceLog.error("Remote source fetch failed for \(url.absoluteString, privacy: .public): \(error, privacy: .public)")
-                self?.remoteInFlight.remove(rule.id)
-                self?.setStatus(rule.id, error: "Download failed: \(error.localizedDescription)")
+                self?.remoteInFlight.remove(list.id)
+                self?.setStatus(list.id, error: "Download failed: \(error.localizedDescription)")
             }
         }
     }
 
     private func applyResolvedTargets(_ id: UUID, hosts: [HostPattern]) {
-        if let idx = rules.firstIndex(where: { $0.id == id }), rules[idx].targets != hosts {
-            rules[idx].targets = hosts
+        if let idx = lists.firstIndex(where: { $0.id == id }), lists[idx].targets != hosts {
+            lists[idx].targets = hosts
         }
         setStatus(id, lastUpdated: Date(), error: nil)
     }
@@ -444,9 +392,6 @@ final class RuleStore: ObservableObject {
     }
 
     private func startTimer() {
-        // Re-evaluate periodically so day/time windows, budget drain, and auto-lock take effect
-        // without user action. 5s is responsive enough for a re-block; evaluation is trivial and
-        // the snapshot is tiny. Source resolution piggybacks (files re-read only when mtime changes).
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.resolveSources()

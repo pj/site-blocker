@@ -28,7 +28,7 @@ enum MobileEnforcer {
         if let url = container?.appendingPathComponent("rules.json"),
            let data = try? Data(contentsOf: url),
            let legacy = try? JSONDecoder().decode([MobileRule].self, from: data) {
-            let migrated = legacy.map(SiteList.init(migrating:))
+            let migrated = legacy.map { SiteList(migrating: $0.asRule) }
             saveLists(migrated)
             return migrated
         }
@@ -92,22 +92,40 @@ enum MobileEnforcer {
         return total
     }
 
-    // MARK: Evaluation
+    // MARK: Evaluation (via the shared ListEngine)
+
+    private static func context(now: Date = Date()) -> RuleContext {
+        RuleContext(now: now, calendar: calendar, unblockedTimeToday: unblockedTimeToday(now: now))
+    }
 
     static func blockedDomainsNow(now: Date = Date()) -> [String] {
-        Blocking.blockedDomains(loadLists(), now: now, calendar: calendar,
-                                unlocked: isUnlocked, usedToday: unblockedTimeToday(now: now))
+        ListEngine(lists: loadLists())
+            .blockedPatterns(unlocked: isUnlocked, in: context(now: now)).map(\.domain)
+    }
+
+    /// The ids of the lists that are blocked right now (drives the live status in the UI).
+    static func blockedListIDs(now: Date = Date()) -> Set<UUID> {
+        let ctx = context(now: now)
+        let engine = ListEngine()
+        return Set(loadLists()
+            .filter { engine.decision(for: $0, unlocked: isUnlocked, in: ctx) == .blocked }
+            .map(\.id))
+    }
+
+    /// The rule currently deciding `list` (the first with an active condition), for the "active now"
+    /// marker. Evaluated against the shared clock/usage, matching what enforcement uses.
+    static func activeRuleID(for list: SiteList, now: Date = Date()) -> UUID? {
+        ListEngine().activeRule(for: list, in: context(now: now))?.id
     }
 
     /// True when unlocking would open at least one list (a limited Allow rule is active with budget).
     static func canUnlockNow(now: Date = Date()) -> Bool {
-        Blocking.canUnlock(loadLists(), now: now, calendar: calendar,
-                           usedToday: unblockedTimeToday(now: now))
+        ListEngine(lists: loadLists()).canUnlock(in: context(now: now))
     }
 
     /// True when some list is open via a no-limit Allow rule (auto-open, no unlock needed).
     static func openAccessActive(now: Date = Date()) -> Bool {
-        Blocking.openAccessActive(loadLists(), now: now, calendar: calendar)
+        ListEngine(lists: loadLists()).openAccessActive(in: context(now: now))
     }
 
     /// Whether anything is currently open — manually unlocked, or an auto-open Allow rule is active.
@@ -124,8 +142,11 @@ enum MobileEnforcer {
     }
 
     static func budgetStatus(now: Date = Date()) -> BudgetStatus? {
-        guard let minutes = Blocking.budgetLimitMinutes(loadLists()) else { return nil }
-        return BudgetStatus(used: unblockedTimeToday(now: now), limit: TimeInterval(minutes * 60))
+        let limit = loadLists().filter(\.isEnabled).flatMap(\.rules)
+            .filter { $0.action == .allow }
+            .compactMap(\.dailyLimit).max()
+        guard let limit else { return nil }
+        return BudgetStatus(used: unblockedTimeToday(now: now), limit: limit)
     }
 
     /// Recompute the blocked domain set and rewrite the Safari ruleset.

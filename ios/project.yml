@@ -2,8 +2,8 @@
 #
 # Site blocking (no Family Controls, so no special Apple approval — ships to TestFlight directly):
 #  - Sites: a Safari Content Blocker extension fed a regenerated rule JSON via an App Group.
-#  - The app owns the domain lists (each with an allow schedule: days + optional time window + Face-ID
-#    gating, mirroring macOS) and rewrites the ruleset (SiteRuleset) for the *current moment*. A
+#  - The app owns the site lists (each with ordered Allow/Deny rules + a per-list default, the shared
+#    SiteList model) and rewrites the ruleset (SiteRuleset) for the *current moment*. A
 #    Safari content blocker is static, so the app re-evaluates and rebuilds on every wake — launch,
 #    foreground, a timer while open, and Background App Refresh — meaning a schedule boundary takes
 #    effect the next time the app runs, not to the minute in the background. (Exact-time background
@@ -127,7 +127,6 @@ targets:
     sources:
       - path: Tests
       - path: Shared/MobileRule.swift
-      - path: Shared/SiteList.swift
     dependencies:
       - package: RulesEngine
     settings:

@@ -1,85 +1,104 @@
 import Foundation
 import RulesEngine
 
-/// Loads/saves the rule list + usage, and publishes the `PolicySnapshot` the content-filter
+/// Loads/saves the site lists + usage, and publishes the `PolicySnapshot` the content-filter
 /// extension reads.
 ///
-/// Rules + usage live in Application Support (app-private). The snapshot is written to the shared
-/// App Group container so the extension — a separate process — can read it. In mock mode there is
-/// no extension reading it, but we still write it so the data flow is exercised and inspectable.
+/// Lists + usage live in Application Support (app-private). The snapshot goes to the shared App Group
+/// container so the extension — a separate process — can read it. New storage is `lists.json`; the
+/// legacy `rules.json` (`[Rule]`) is migrated once and left in place.
 struct PersistenceController {
     static let shared = PersistenceController()
 
     /// Must match `com.apple.security.application-groups` in both entitlements files.
     static let appGroupID = "group.com.pauljohnson.siteblocker"
 
+    /// An isolated storage directory for tests. When set, iCloud sync is skipped so tests can't
+    /// touch (or be perturbed by) the real key-value store.
+    private let overrideDir: URL?
+    init(overrideDir: URL? = nil) { self.overrideDir = overrideDir }
+    private var syncsCloud: Bool { overrideDir == nil }
+
     struct Loaded {
-        var rules: [Rule]
+        var lists: [SiteList]
         var usage: DailyUsage
     }
 
     private var supportDir: URL {
+        if let overrideDir {
+            try? FileManager.default.createDirectory(at: overrideDir, withIntermediateDirectories: true)
+            return overrideDir
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("SiteBlocker", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
-    private var rulesURL: URL { supportDir.appendingPathComponent("rules.json") }
+    private var listsURL: URL { supportDir.appendingPathComponent("lists.json") }
+    private var legacyRulesURL: URL { supportDir.appendingPathComponent("rules.json") }
     private var usageURL: URL { supportDir.appendingPathComponent("usage.json") }
 
     /// Shared with the (root) extension via a fixed `/Users/Shared` path — see `PolicySnapshot.fileURL`.
     var snapshotURL: URL { PolicySnapshot.fileURL }
 
     // MARK: iCloud key-value sync
-    //
-    // State is mirrored into `NSUbiquitousKeyValueStore` when signed into iCloud (it's a harmless
-    // local no-op otherwise). Rules use last-writer-wins by timestamp; usage always merges by max
-    // so a sync can never hand back viewing time already spent. Resolved file/URL blocklists are
-    // stripped before syncing (they re-resolve per device, and the 1 MB KVS cap is small).
 
     private var kv: NSUbiquitousKeyValueStore { .default }
     private enum KVKey {
-        static let rules = "rules", usage = "usage", rulesUpdatedAt = "rulesUpdatedAt"
+        static let lists = "lists", usage = "usage", listsUpdatedAt = "listsUpdatedAt"
     }
-    /// Local marker for "when did *this* device last change the rules", to compare against iCloud.
-    private var localRulesTimestamp: TimeInterval {
-        get { UserDefaults.standard.double(forKey: "localRulesTimestamp") }
-        nonmutating set { UserDefaults.standard.set(newValue, forKey: "localRulesTimestamp") }
+    private var localListsTimestamp: TimeInterval {
+        get { UserDefaults.standard.double(forKey: "localListsTimestamp") }
+        nonmutating set { UserDefaults.standard.set(newValue, forKey: "localListsTimestamp") }
+    }
+
+    /// Read `lists.json`, else migrate the legacy `[Rule]` `rules.json`, else the starter set.
+    private func loadLocalLists() -> [SiteList] {
+        if let data = try? Data(contentsOf: listsURL),
+           let lists = try? JSONDecoder().decode([SiteList].self, from: data) {
+            return lists
+        }
+        if let data = try? Data(contentsOf: legacyRulesURL),
+           let legacy = try? JSONDecoder().decode([Rule].self, from: data) {
+            let migrated = legacy.map(SiteList.init(migrating:))
+            try? JSONEncoder().encode(migrated).write(to: listsURL)
+            return migrated
+        }
+        return Self.starterLists
     }
 
     func load() -> Loaded {
-        var rules = (try? Data(contentsOf: rulesURL))
-            .flatMap { try? JSONDecoder().decode([Rule].self, from: $0) } ?? Self.starterRules
+        var lists = loadLocalLists()
         var usage = (try? Data(contentsOf: usageURL))
             .flatMap { try? JSONDecoder().decode(DailyUsage.self, from: $0) } ?? DailyUsage()
 
-        kv.synchronize()
-        // Adopt iCloud rules if another device changed them more recently than this one.
-        if kv.double(forKey: KVKey.rulesUpdatedAt) > localRulesTimestamp,
-           let data = kv.data(forKey: KVKey.rules),
-           let remote = try? JSONDecoder().decode([Rule].self, from: data) {
-            rules = remote
-            localRulesTimestamp = kv.double(forKey: KVKey.rulesUpdatedAt)
+        if syncsCloud {
+            kv.synchronize()
+            if kv.double(forKey: KVKey.listsUpdatedAt) > localListsTimestamp,
+               let data = kv.data(forKey: KVKey.lists),
+               let remote = try? JSONDecoder().decode([SiteList].self, from: data) {
+                lists = remote
+                localListsTimestamp = kv.double(forKey: KVKey.listsUpdatedAt)
+            }
+            if let data = kv.data(forKey: KVKey.usage),
+               let remote = try? JSONDecoder().decode(DailyUsage.self, from: data) {
+                usage.mergeTakingMax(remote)
+            }
         }
-        if let data = kv.data(forKey: KVKey.usage),
-           let remote = try? JSONDecoder().decode(DailyUsage.self, from: data) {
-            usage.mergeTakingMax(remote)
-        }
-        return Loaded(rules: rules, usage: usage)
+        return Loaded(lists: lists, usage: usage)
     }
 
-    /// Merge current iCloud state into what's in memory — used when iCloud reports an external
-    /// change from another device. Returns `nil` when nothing relevant changed.
-    func mergeFromCloud(currentRules: [Rule], currentUsage: DailyUsage) -> Loaded? {
+    /// Merge current iCloud state into what's in memory — used when iCloud reports an external change.
+    func mergeFromCloud(currentLists: [SiteList], currentUsage: DailyUsage) -> Loaded? {
         var changed = false
-        var rules = currentRules
+        var lists = currentLists
         var usage = currentUsage
-        if kv.double(forKey: KVKey.rulesUpdatedAt) > localRulesTimestamp,
-           let data = kv.data(forKey: KVKey.rules),
-           let remote = try? JSONDecoder().decode([Rule].self, from: data) {
-            rules = remote
-            localRulesTimestamp = kv.double(forKey: KVKey.rulesUpdatedAt)
+        if kv.double(forKey: KVKey.listsUpdatedAt) > localListsTimestamp,
+           let data = kv.data(forKey: KVKey.lists),
+           let remote = try? JSONDecoder().decode([SiteList].self, from: data) {
+            lists = remote
+            localListsTimestamp = kv.double(forKey: KVKey.listsUpdatedAt)
             changed = true
         }
         if let data = kv.data(forKey: KVKey.usage),
@@ -88,36 +107,34 @@ struct PersistenceController {
             merged.mergeTakingMax(remote)
             if merged != usage { usage = merged; changed = true }
         }
-        return changed ? Loaded(rules: rules, usage: usage) : nil
+        return changed ? Loaded(lists: lists, usage: usage) : nil
     }
 
-    func save(rules: [Rule], usage: DailyUsage) {
-        let rulesData = try? JSONEncoder().encode(rules)
+    func save(lists: [SiteList], usage: DailyUsage) {
+        if let data = try? JSONEncoder().encode(lists) { try? data.write(to: listsURL) }
         let usageData = try? JSONEncoder().encode(usage)
-        if let rulesData { try? rulesData.write(to: rulesURL) }
         if let usageData { try? usageData.write(to: usageURL) }
 
-        // Mirror to iCloud. Sync a slimmed copy of the rules (resolved file/URL blocklists dropped —
-        // they re-resolve per device and would blow the 1 MB cap).
-        if let slim = try? JSONEncoder().encode(rules.map(Self.strippedForSync)) {
-            kv.set(slim, forKey: KVKey.rules)
+        guard syncsCloud else { return }
+        if let slim = try? JSONEncoder().encode(lists.map(Self.strippedForSync)) {
+            kv.set(slim, forKey: KVKey.lists)
             let now = Date().timeIntervalSince1970
-            kv.set(now, forKey: KVKey.rulesUpdatedAt)
-            localRulesTimestamp = now
+            kv.set(now, forKey: KVKey.listsUpdatedAt)
+            localListsTimestamp = now
         }
         if let usageData { kv.set(usageData, forKey: KVKey.usage) }
         kv.synchronize()
     }
 
-    /// Drop the cached resolved targets for file/URL-sourced rules before syncing — those re-resolve
-    /// on each device, and a large blocklist would exceed the key-value store's 1 MB limit.
-    private static func strippedForSync(_ rule: Rule) -> Rule {
-        guard case .manual = rule.source else {
-            var slim = rule
+    /// Drop cached resolved targets for file/URL-sourced lists before syncing (they re-resolve per
+    /// device, and a large blocklist would exceed the key-value store's 1 MB limit).
+    private static func strippedForSync(_ list: SiteList) -> SiteList {
+        guard case .manual = list.source else {
+            var slim = list
             slim.targets = []
             return slim
         }
-        return rule
+        return list
     }
 
     func writeSnapshot(_ snapshot: PolicySnapshot) {
@@ -126,19 +143,17 @@ struct PersistenceController {
         if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: snapshotURL) }
     }
 
-    /// Seed content so a fresh install shows the allow model: sites blocked by default, viewable
-    /// only inside the rule's window and up to its daily budget.
-    static let starterRules: [Rule] = [
-        Rule(name: "Socials — weekday lunch",
-             targets: ["twitter.com", "x.com", "reddit.com", "instagram.com"],
-             condition: .allOf([
-                 .onDaysOfWeek([.monday, .tuesday, .wednesday, .thursday, .friday]),
-                 .duringTimeOfDay(TimeWindow(startHour: 12, endHour: 13)),
-             ]),
-             dailyLimit: 30 * 60),
-        Rule(name: "YouTube — 20 min/day",
-             targets: ["youtube.com"],
-             condition: .always,
-             dailyLimit: 20 * 60),
+    /// Seed content for a fresh install: sites blocked by default, viewable inside a rule's window
+    /// and up to its daily budget.
+    static let starterLists: [SiteList] = [
+        SiteList(name: "Socials — weekday lunch",
+                 targets: ["twitter.com", "x.com", "reddit.com", "instagram.com"],
+                 rules: [ListRule(action: .allow, condition: .allOf([
+                     .onDaysOfWeek([.monday, .tuesday, .wednesday, .thursday, .friday]),
+                     .duringTimeOfDay(TimeWindow(startHour: 12, endHour: 13)),
+                 ]), dailyLimit: 30 * 60)]),
+        SiteList(name: "YouTube — 20 min/day",
+                 targets: ["youtube.com"],
+                 rules: [ListRule(action: .allow, condition: .always, dailyLimit: 20 * 60)]),
     ]
 }

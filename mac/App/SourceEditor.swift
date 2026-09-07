@@ -2,12 +2,12 @@ import SwiftUI
 import RulesEngine
 import UniformTypeIdentifiers
 
-/// The sites popover: pick where a rule's site list comes from — hand-edited, a local file managed
+/// The sites popover: pick where a list's site list comes from — hand-edited, a local file managed
 /// externally, or a blocklist URL — and configure it. The three are mutually exclusive; file/URL
 /// lists are read-only here because the file or server is the source of truth.
 struct SourceEditor: View {
     @EnvironmentObject private var store: RuleStore
-    let rule: Rule
+    let list: SiteList
 
     enum Kind: String, CaseIterable {
         case manual = "Manual", file = "File", url = "URL"
@@ -18,9 +18,9 @@ struct SourceEditor: View {
     @State private var urlString: String
     @State private var showFilePicker = false
 
-    init(rule: Rule) {
-        self.rule = rule
-        switch rule.source {
+    init(list: SiteList) {
+        self.list = list
+        switch list.source {
         case .manual(let hosts):
             _kind = State(initialValue: .manual)
             _manualRows = State(initialValue: hosts.map { EditableTarget(text: $0.domain) })
@@ -64,10 +64,10 @@ struct SourceEditor: View {
         switch kind {
         case .manual:
             // Start from the current resolved list so switching away from file/URL loses nothing.
-            manualRows = rule.targets.map { EditableTarget(text: $0.domain) }
+            manualRows = list.targets.map { EditableTarget(text: $0.domain) }
             commitManual()
         case .file, .url:
-            // Nothing committed until a file is chosen / a URL applied; the rule keeps its
+            // Nothing committed until a file is chosen / a URL applied; the list keeps its
             // previous source and cached targets in the meantime.
             break
         }
@@ -75,10 +75,10 @@ struct SourceEditor: View {
 
     private func commitManual() {
         guard kind == .manual else { return }
-        store.setSource(rule, source: .manual(normalized(manualRows)))
+        store.setSource(list, source: .manual(normalized(manualRows)))
     }
 
-    /// The saved rule gets normalized, deduped hosts; the rows keep raw text so typing isn't
+    /// The saved list gets normalized, deduped hosts; the rows keep raw text so typing isn't
     /// fought by normalization.
     private func normalized(_ rows: [EditableTarget]) -> [HostPattern] {
         var seen = Set<String>()
@@ -97,7 +97,7 @@ struct SourceEditor: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Button("Choose File…") { showFilePicker = true }
-                Text(store.fileDisplayPath(for: rule) ?? "No file selected")
+                Text(store.fileDisplayPath(for: list) ?? "No file selected")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -112,7 +112,7 @@ struct SourceEditor: View {
         .fileImporter(isPresented: $showFilePicker,
                       allowedContentTypes: [.plainText, .text, .commaSeparatedText, .data]) { result in
             if case .success(let url) = result {
-                store.setFileSource(rule, url: url)
+                store.setFileSource(list, url: url)
             }
         }
     }
@@ -126,7 +126,7 @@ struct SourceEditor: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(applyURL)
                 Button(isCurrentURL ? "Refresh" : "Apply") {
-                    isCurrentURL ? store.refreshSource(rule) : applyURL()
+                    isCurrentURL ? store.refreshSource(list) : applyURL()
                 }
                 .disabled(URL(string: urlString.trimmingCharacters(in: .whitespaces)) == nil)
             }
@@ -138,7 +138,7 @@ struct SourceEditor: View {
     }
 
     private var isCurrentURL: Bool {
-        if case .remote(let url) = rule.source {
+        if case .remote(let url) = list.source {
             return url.absoluteString == urlString.trimmingCharacters(in: .whitespaces)
         }
         return false
@@ -149,30 +149,30 @@ struct SourceEditor: View {
         guard let url = URL(string: trimmed), url.scheme == "http" || url.scheme == "https" else {
             return
         }
-        store.setSource(rule, source: .remote(url))
+        store.setSource(list, source: .remote(url))
     }
 
     // MARK: Shared
 
     @ViewBuilder
     private var statusLine: some View {
-        let status = store.sourceStatus[rule.id]
+        let status = store.sourceStatus[list.id]
         if let error = status?.error {
             Text(error).font(.caption).foregroundStyle(.red)
         } else if let updated = status?.lastUpdated {
             Text("Updated \(updated.formatted(date: .omitted, time: .shortened)) — "
-                 + "\(rule.targets.count) sites")
+                 + "\(list.targets.count) sites")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
 
     private var preview: some View {
-        List(rule.targets, id: \.domain) { host in
+        List(list.targets, id: \.domain) { host in
             Text(host.domain)
         }
         .frame(height: 150)
         .overlay {
-            if rule.targets.isEmpty {
+            if list.targets.isEmpty {
                 Text("No sites loaded yet.")
                     .font(.callout).foregroundStyle(.secondary)
             }

@@ -76,6 +76,10 @@ targets:
         ENABLE_DEBUG_DYLIB: NO
         # Drives the real content filter. Remove this line to build against MockEnforcer instead.
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: ENABLE_NETWORK_EXTENSION
+      configs:
+        # Debug (dev) builds open the rules window on launch for quick review; Release doesn't.
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: ENABLE_NETWORK_EXTENSION AUTO_OPEN_WINDOW
 
   FilterExtension:
     type: system-extension
@@ -112,3 +116,20 @@ targets:
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: Developer ID Application
         PROVISIONING_PROFILE_SPECIFIER: ${EXT_PROVISIONING_PROFILE}
+
+  # Headless integration tests for the persistence layer (migration + round-trip). No test host: it
+  # compiles Persistence.swift (self-contained over RulesEngine) so `just mac-test` runs it fast.
+  SiteBlockerTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+      - path: App/Persistence.swift
+    dependencies:
+      - package: RulesEngine
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pauljohnson.siteblocker.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"

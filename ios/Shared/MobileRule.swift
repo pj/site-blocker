@@ -93,30 +93,3 @@ struct MobileRule: Identifiable, Codable, Equatable {
         String(format: "%02d:%02d", minutes / 60, minutes % 60)
     }
 }
-
-// MARK: - Weekday labels (iOS copy; the macOS app has its own in ConditionSchedule.swift)
-
-extension Weekday {
-    /// Single-letter label for the compact day toggles.
-    var letter: String {
-        switch self {
-        case .sunday, .saturday: "S"
-        case .monday:            "M"
-        case .tuesday, .thursday: "T"
-        case .wednesday:         "W"
-        case .friday:            "F"
-        }
-    }
-
-    var shortLabel: String {
-        switch self {
-        case .sunday:    "Sun"
-        case .monday:    "Mon"
-        case .tuesday:   "Tue"
-        case .wednesday: "Wed"
-        case .thursday:  "Thu"
-        case .friday:    "Fri"
-        case .saturday:  "Sat"
-        }
-    }
-}

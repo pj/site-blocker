@@ -1,11 +1,9 @@
 import SwiftUI
 import RulesEngine
 
-/// The rules management screen. Each rule is a single line: three static condition controls (which
-/// days, an optional time-of-day window, an optional daily unblocked-time limit — all ANDed; want
-/// OR? add another rule, the engine ORs rules), a sites button that opens the list editor in a
-/// popover, the enable switch, and delete. An optional free-text name labels the row (purely a
-/// guide for the user — it has no effect on matching).
+/// The management screen. Each **site list** is a card: its sites (a manual/file/URL source), a
+/// default (Allowed/Blocked when no rule is active), and an *ordered* list of Allow/Deny **rules**
+/// (first active rule wins). Rules OR together within their action; edit fully in place.
 struct ContentView: View {
     @EnvironmentObject private var store: RuleStore
 
@@ -21,46 +19,40 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(store.isUnlocked ? .green : .red)
                 .disabled(!store.isUnlocked && !store.canUnlock)
-                .help(store.isUnlocked ? "Lock now"
-                                       : (store.canUnlock ? "Unlock the allowed sites (Touch ID)"
-                                                          : "Nothing is allowed right now"))
 
-                Text(statusText)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-
+                Text(statusText).font(.callout).foregroundStyle(.secondary)
                 Spacer()
-
                 Text("Viewed today: \(Self.duration(store.totalUsageToday))")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(.callout).foregroundStyle(.secondary)
             }
             .padding(8)
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(store.rules) { rule in
-                        RuleRow(rule: rule)
-                        Divider()
+                VStack(spacing: 8) {
+                    ForEach($store.lists) { $list in
+                        ListRowView(list: $list)
                     }
                 }
+                .padding(12)
             }
             .overlay {
-                if store.rules.isEmpty {
-                    ContentUnavailableView("No Rules", systemImage: "hand.raised",
-                                           description: Text("Add a rule to start blocking."))
+                if store.lists.isEmpty {
+                    ContentUnavailableView("No Lists", systemImage: "hand.raised",
+                                           description: Text("Add a site list to start blocking."))
                 }
             }
 
             Divider()
             HStack {
-                Button { addRule() } label: { Label("Add Rule", systemImage: "plus") }
+                Button { store.add(SiteList(name: "New List", rules: [SiteList.defaultRule()])) } label: {
+                    Label("Add List", systemImage: "plus")
+                }
                 Spacer()
             }
             .padding(8)
         }
-        .frame(minWidth: 880, minHeight: 380)
+        .frame(minWidth: 900, minHeight: 420)
     }
 
     private var statusText: String {
@@ -68,14 +60,10 @@ struct ContentView: View {
         if store.openAccessActive {
             return store.canUnlock ? "Some sites open · unlock available" : "Some sites open now"
         }
-        return store.canUnlock ? "Locked — unlock available" : "Locked — no allowance active now"
+        return store.canUnlock ? "Locked — unlock available" : "Locked — following rules"
     }
 
-    private func addRule() {
-        store.add(Rule())
-    }
-
-    private static func duration(_ seconds: TimeInterval) -> String {
+    static func duration(_ seconds: TimeInterval) -> String {
         let mins = Int(seconds / 60)
         let h = mins / 60, m = mins % 60
         if h == 0 { return "\(m)m" }
@@ -84,179 +72,367 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Rule row
+// MARK: - List row (one list, six aligned columns)
 
-/// One rule on one line, edited fully in place; every change commits straight back to the store.
-private struct RuleRow: View {
+private struct ListRowView: View {
     @EnvironmentObject private var store: RuleStore
-    let rule: Rule
-
-    @State private var schedule: RuleSchedule
-    @State private var name: String
+    @Binding var list: SiteList
     @State private var showSites = false
 
-    init(rule: Rule) {
-        self.rule = rule
-        _schedule = State(initialValue: RuleSchedule(condition: rule.condition,
-                                                     dailyLimit: rule.dailyLimit))
-        _name = State(initialValue: rule.name)
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            // 1. Block status — a dot; the label shows on hover.
+            Circle().fill(statusColor).frame(width: 9, height: 9)
+                .help(statusText)
+
+            // 2. Name.
+            TextField("Name", text: $list.name)
+                .textFieldStyle(.roundedBorder).frame(width: 150)
+
+            // 3. List (sites source).
+            sitesButton.frame(width: 130, alignment: .leading)
+
+            // 4. Sub rules.
+            RulesColumn(list: $list)
+
+            // 5. Enable / disable (right side).
+            Toggle("", isOn: Binding(
+                get: { list.isEnabled },
+                set: { _ in Task { await store.toggleListAuthenticated(list) } }))
+                .toggleStyle(.switch).labelsHidden()
+                .help(list.isEnabled ? "Disable list (auth)" : "Enable list (auth)")
+
+            // 6. Delete (right side).
+            Button { Task { await store.deleteAuthenticated(list) } } label: {
+                Image(systemName: "trash").font(.title3)
+            }
+            .buttonStyle(.borderedProminent).tint(.red).controlSize(.large).fixedSize()
+            .help("Delete list (requires authentication)")
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(rowColor))
     }
 
-    var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            Button { Task { await store.deleteAuthenticated(rule) } } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .help("Delete rule (requires authentication)")
-
-            Toggle("", isOn: Binding(
-                get: { rule.isEnabled },
-                set: { _ in Task { await store.toggleRuleAuthenticated(rule) } }))
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .help(rule.isEnabled ? "Disable rule (requires authentication)"
-                                     : "Enable rule (requires authentication)")
-
-            LabeledControl(title: "Name") {
-                TextField("Optional", text: $name)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 150)
-            }
-
-            sitesButton
-
-            Divider().frame(height: 34)
-
-            DaysControl(days: $schedule.days)
-            TimeControl(enabled: $schedule.timeEnabled, window: $schedule.window)
-            QuotaControl(enabled: $schedule.quotaEnabled, minutes: $schedule.quotaMinutes, rule: rule)
-
-            Spacer(minLength: 8)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .onChange(of: schedule) { commit() }
-        .onChange(of: name) { commit() }
+    private var statusColor: Color {
+        if !list.isEnabled { return .secondary }
+        return store.blockedListIDs.contains(list.id) ? .red : .green
+    }
+    private var statusText: String {
+        if !list.isEnabled { return "Disabled" }
+        return store.blockedListIDs.contains(list.id) ? "Blocked now" : "Open now"
+    }
+    /// A faint tint of the current status behind the whole row.
+    private var rowColor: Color {
+        if !list.isEnabled { return Color.gray.opacity(0.14) }
+        return store.blockedListIDs.contains(list.id)
+            ? Color.red.opacity(0.09) : Color.green.opacity(0.08)
     }
 
     private var sitesButton: some View {
-        Button {
-            showSites = true
-        } label: {
-            Label(sitesSummary, systemImage: sitesIcon)
-        }
-        .controlSize(.small)
-        .popover(isPresented: $showSites, arrowEdge: .bottom) {
-            SourceEditor(rule: rule)
-                .padding(12)
-                .frame(width: 400)
-        }
-        .help("Edit blocked sites")
+        Button { showSites = true } label: { Label(sitesSummary, systemImage: sitesIcon) }
+            .controlSize(.small)
+            .popover(isPresented: $showSites, arrowEdge: .bottom) {
+                SourceEditor(list: list).padding(12).frame(width: 400)
+            }
+            .help("Edit this list's sites")
     }
-
-    /// An SF Symbol hinting where the list comes from: hand-edited, a local file, or a URL blocklist.
     private var sitesIcon: String {
-        switch rule.source {
+        switch list.source {
         case .manual: return "list.bullet"
         case .file:   return "doc"
         case .remote: return "link"
         }
     }
-
-    /// Summarise the source *and* its size so a file/URL list doesn't read as "1 site". Manual lists
-    /// just show the count; file/remote lists prefix the kind (the count is what they resolved to).
     private var sitesSummary: String {
-        let n = rule.targets.count
+        let n = list.targets.count
         let sites = "\(n.formatted()) \(n == 1 ? "site" : "sites")"
-        switch rule.source {
+        switch list.source {
         case .manual: return sites
         case .file:   return "File · \(sites)"
-        case .remote: return "URL list · \(sites)"
+        case .remote: return "URL · \(sites)"
+        }
+    }
+}
+
+/// Column 2: the ordered rules. The last rule is the catch-all default — always present, pinned at
+/// the bottom, and not removable; "Add Rule" inserts a new rule just before it.
+private struct RulesColumn: View {
+    @Binding var list: SiteList
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach($list.rules) { $rule in
+                RuleRow(rule: $rule,
+                        isFirst: rule.id == list.rules.first?.id,
+                        isDefault: rule.id == list.rules.last?.id) {
+                    list.rules.removeAll { $0.id == rule.id }
+                }
+            }
+            Button { list.rules.insert(ListRule(), at: max(0, list.rules.count - 1)) } label: {
+                Label("Add Rule", systemImage: "plus").font(.callout)
+            }
+            .buttonStyle(.borderless).padding(.leading, 4)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Green Allow / red Deny chip with a menu to switch. Shared by rules and the list default.
+private struct ActionChip: View {
+    let isAllow: Bool
+    var help: String = ""
+    let onSet: (Bool) -> Void
+    var body: some View {
+        Menu {
+            Button("Allow") { onSet(true) }
+            Button("Deny") { onSet(false) }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isAllow ? "checkmark.circle.fill" : "xmark.circle.fill").font(.caption2)
+                Text(isAllow ? "Allow" : "Deny").font(.caption.weight(.semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Capsule().fill(isAllow ? Color.green : Color.red))
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help(help)
+    }
+}
+
+
+// MARK: - Rule row (one Allow/Deny rule, chip-based)
+
+private struct RuleRow: View {
+    @EnvironmentObject private var store: RuleStore
+    @Binding var rule: ListRule
+    let isFirst: Bool
+    /// The last rule in a list is the catch-all default: pure Allow/Deny, no conditions, not removable.
+    let isDefault: Bool
+    let onDelete: () -> Void
+
+    @State private var schedule: RuleSchedule
+    @State private var editingDays = false
+    @State private var editingTime = false
+    @State private var editingLimit = false
+
+    /// Live width of the Days chip, and the width it had when the Days popover opened. While the
+    /// popover is open we pin the chip to that frozen width so the anchor can't move — the popover
+    /// stays perfectly still as the day-preview text changes, then the chip snaps to fit on close.
+    @State private var daysChipWidth: CGFloat = 0
+    @State private var frozenDaysWidth: CGFloat?
+
+    init(rule: Binding<ListRule>, isFirst: Bool, isDefault: Bool, onDelete: @escaping () -> Void) {
+        _rule = rule
+        self.isFirst = isFirst
+        self.isDefault = isDefault
+        self.onDelete = onDelete
+        _schedule = State(initialValue: RuleSchedule(condition: rule.wrappedValue.condition,
+                                                     dailyLimit: rule.wrappedValue.dailyLimit))
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("OR").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+                .opacity(isFirst ? 0 : 1)   // hidden on the first rule, but keeps the box aligned
+                .help("A list's rules are OR'd — any matching rule applies")
+
+            chipBox
+
+            Button(action: onDelete) { Image(systemName: "minus.circle") }
+                .buttonStyle(.borderless).help("Remove rule")
+                .opacity(isDefault ? 0 : 1)          // the default (last) rule can't be removed
+                .disabled(isDefault)                  // but keep its slot so rows stay aligned
+
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 4)
+        .onChange(of: schedule) { commit() }
+        .onChange(of: rule.action) { commit() }
+    }
+
+    /// The rule's Allow/Deny action then its conditions (AND'd), boxed together.
+    /// The default rule is a pure catch-all: just the Allow/Deny action, no conditions.
+    private var chipBox: some View {
+        HStack(spacing: 6) {
+            actionChip
+
+            if !isDefault {
+            Divider().frame(height: 16)
+
+            // Days chip (always present — a rule always applies on some days).
+            Chip(icon: "calendar", text: daysText, tint: schedule.days.isEmpty ? .orange : .secondary)
+                { frozenDaysWidth = daysChipWidth; editingDays = true }
+                .frame(width: frozenDaysWidth, alignment: .leading)   // pinned while the popover is open
+                .background(GeometryReader { g in
+                    Color.clear
+                        .onAppear { daysChipWidth = g.size.width }
+                        .onChange(of: g.size.width) { if frozenDaysWidth == nil { daysChipWidth = $0 } }
+                })
+                .popover(isPresented: $editingDays, arrowEdge: .bottom,
+                         content: { ChipPopover(title: "Days") { DayCircles(days: $schedule.days) } })
+                .onChange(of: editingDays) { if !$0 { frozenDaysWidth = nil } }   // release on close
+
+            // Time chip (optional) — ANDed with the other conditions.
+            if schedule.timeEnabled {
+                andLabel
+                Chip(icon: "clock", text: timeText, onRemove: { schedule.timeEnabled = false })
+                    { editingTime = true }
+                    .popover(isPresented: $editingTime, arrowEdge: .bottom) {
+                        ChipPopover(title: "Time of day") { TimeEditor(window: $schedule.window) }
+                    }
+            }
+
+            // Daily-limit chip (Allow rules only) — ANDed with the other conditions.
+            if rule.action == .allow && schedule.quotaEnabled {
+                andLabel
+                Chip(icon: "hourglass", text: "\(schedule.quotaMinutes)m/day",
+                     tint: exhausted ? .red : .secondary,
+                     onRemove: { schedule.quotaEnabled = false }) { editingLimit = true }
+                    .popover(isPresented: $editingLimit, arrowEdge: .bottom) {
+                        ChipPopover(title: "Daily limit") {
+                            Stepper("\(schedule.quotaMinutes) min/day",
+                                    value: $schedule.quotaMinutes, in: 5...240, step: 5).fixedSize()
+                        }
+                    }
+            }
+
+            if canAdd {
+                Menu {
+                    if !schedule.timeEnabled {
+                        Button("Time of day") { schedule.timeEnabled = true; editingTime = true }
+                    }
+                    if rule.action == .allow && !schedule.quotaEnabled {
+                        Button("Daily limit") { schedule.quotaEnabled = true; editingLimit = true }
+                    }
+                } label: {
+                    Image(systemName: "plus.circle").foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .help("Add a condition (AND)")
+            }
+            }   // end if !isDefault
+        }
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.18)))
+        .fixedSize()
+    }
+
+    private var canAdd: Bool {
+        !schedule.timeEnabled || (rule.action == .allow && !schedule.quotaEnabled)
+    }
+    private var exhausted: Bool {
+        schedule.quotaEnabled && store.totalUsageToday >= TimeInterval(schedule.quotaMinutes * 60)
+    }
+    private var timeText: String {
+        "\(clock(schedule.window.startMinutes))–\(clock(schedule.window.endMinutes))"
+    }
+    private var daysText: String {
+        let d = schedule.days
+        if d == RuleSchedule.everyDay { return "Every day" }
+        if d.isEmpty { return "Never" }
+        let weekdays: Set<Weekday> = [.monday, .tuesday, .wednesday, .thursday, .friday]
+        if d == weekdays { return "Weekdays" }
+        if d == [.saturday, .sunday] { return "Weekends" }
+        return Weekday.allCases.filter(d.contains).map(\.shortLabel).joined(separator: ", ")
+    }
+    private func clock(_ m: Int) -> String { String(format: "%02d:%02d", m / 60, m % 60) }
+
+    /// Separator between a rule's condition chips (they're AND'd together).
+    private var andLabel: some View {
+        Text("AND").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+            .help("All of a rule's conditions must match (AND)")
+    }
+
+    /// Allow/Deny as a chip at the start of the box.
+    private var actionChip: some View {
+        ActionChip(isAllow: rule.action == .allow,
+                   help: "Allow or deny these sites when this rule matches") {
+            rule.action = $0 ? .allow : .deny
         }
     }
 
     private func commit() {
-        var updated = rule
-        updated.name = name
-        updated.condition = schedule.condition
-        updated.dailyLimit = schedule.dailyLimit
-        store.update(updated)
-    }
-}
-
-// MARK: - Static condition controls
-
-/// A control group with a small caption above its control, so every rule shows the same columns.
-private struct LabeledControl<Control: View>: View {
-    let title: String
-    @ViewBuilder var control: Control
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-            control
+        if isDefault {                       // catch-all: always active, no limit
+            rule.condition = .always
+            rule.dailyLimit = nil
+            return
         }
+        rule.condition = schedule.condition
+        rule.dailyLimit = rule.action == .allow ? schedule.dailyLimit : nil
     }
 }
 
-/// Seven letter toggles, like Screen Time's day picker. All selected = every day.
-private struct DaysControl: View {
-    @Binding var days: Set<Weekday>
+// MARK: - Chip + popover building blocks
+
+private struct Chip: View {
+    let icon: String
+    let text: String
+    var tint: Color = .secondary
+    var onRemove: (() -> Void)? = nil
+    let onTap: () -> Void
 
     var body: some View {
-        LabeledControl(title: "Days") {
-            HStack(spacing: 3) {
-                ForEach(Weekday.allCases, id: \.self) { day in
-                    let on = days.contains(day)
-                    // Style lives inside the label (with an explicit contentShape) so the whole
-                    // circle is the tap target — a `.plain` button only hit-tests its label, so
-                    // frame/background applied outside it would leave just the letter clickable.
-                    Button { toggle(day) } label: {
-                        Text(day.letter)
-                            .font(.caption2.weight(.semibold))
-                            .frame(width: 20, height: 20)
-                            .background(Circle().fill(on ? Color.accentColor
-                                                         : Color.secondary.opacity(0.15)))
-                            .foregroundStyle(on ? Color.white : Color.secondary)
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(day.shortLabel)
+        HStack(spacing: 4) {
+            Button(action: onTap) {
+                HStack(spacing: 4) {
+                    Image(systemName: icon).font(.caption2)
+                    Text(text).font(.caption).lineLimit(1)
                 }
+                .foregroundStyle(tint == .secondary ? Color.primary : tint)
+            }
+            .buttonStyle(.plain)
+            if let onRemove {
+                Button(action: onRemove) { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)) }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove")
             }
         }
-    }
-
-    private func toggle(_ day: Weekday) {
-        if days.contains(day) { days.remove(day) } else { days.insert(day) }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(Capsule().fill(Color.secondary.opacity(0.14)))
     }
 }
 
-/// A checkbox that gates an optional time-of-day window; the pickers dim when it's off.
-private struct TimeControl: View {
-    @Binding var enabled: Bool
-    @Binding var window: TimeWindow
-
+private struct ChipPopover<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Toggle(isOn: $enabled) { Text("Time of day").font(.caption2) }
-                .toggleStyle(.checkbox)
-            HStack(spacing: 3) {
-                DatePicker("", selection: minutesBinding(\.startMinutes),
-                           displayedComponents: .hourAndMinute)
-                Text("–").foregroundStyle(.secondary)
-                DatePicker("", selection: minutesBinding(\.endMinutes),
-                           displayedComponents: .hourAndMinute)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            content
+        }
+        .padding(12)
+    }
+}
+
+private struct DayCircles: View {
+    @Binding var days: Set<Weekday>
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(Weekday.allCases, id: \.self) { day in
+                let on = days.contains(day)
+                Button { if on { days.remove(day) } else { days.insert(day) } } label: {
+                    Text(day.letter)
+                        .font(.caption2.weight(.semibold)).frame(width: 22, height: 22)
+                        .background(Circle().fill(on ? Color.accentColor : Color.secondary.opacity(0.15)))
+                        .foregroundStyle(on ? Color.white : Color.secondary)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain).help(day.shortLabel)
             }
-            .labelsHidden()
-            .fixedSize()
-            .disabled(!enabled)
-            .opacity(enabled ? 1 : 0.4)
         }
     }
+}
 
-    /// Bridges minutes-since-midnight to the Date a `DatePicker(.hourAndMinute)` wants.
+private struct TimeEditor: View {
+    @Binding var window: TimeWindow
+    var body: some View {
+        HStack(spacing: 4) {
+            DatePicker("", selection: minutesBinding(\.startMinutes), displayedComponents: .hourAndMinute)
+            Text("–").foregroundStyle(.secondary)
+            DatePicker("", selection: minutesBinding(\.endMinutes), displayedComponents: .hourAndMinute)
+        }
+        .labelsHidden().fixedSize()
+    }
     private func minutesBinding(_ keyPath: WritableKeyPath<TimeWindow, Int>) -> Binding<Date> {
         Binding {
             Calendar.current.startOfDay(for: Date())
@@ -265,32 +441,5 @@ private struct TimeControl: View {
             let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
             window[keyPath: keyPath] = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         }
-    }
-}
-
-/// A checkbox that gates an optional daily budget of viewing time; goes red once spent.
-private struct QuotaControl: View {
-    @EnvironmentObject private var store: RuleStore
-    @Binding var enabled: Bool
-    @Binding var minutes: Int
-    let rule: Rule
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Toggle(isOn: $enabled) { Text("Daily limit").font(.caption2) }
-                .toggleStyle(.checkbox)
-                .help("Off: these sites are simply available during the window — no unlock, no timer. On: they're unlock-gated (Touch ID) and drain the daily budget below.")
-            Stepper("\(minutes) min/day", value: $minutes, in: 5...240, step: 5)
-                .font(.callout)
-                .fixedSize()
-                .disabled(!enabled)
-                .opacity(enabled ? 1 : 0.4)
-                .foregroundStyle(exhausted ? Color.red : Color.primary)
-                .help("Daily budget of viewing time — drains while unlocked; at zero these sites re-block for the rest of the day")
-        }
-    }
-
-    private var exhausted: Bool {
-        enabled && store.totalUsageToday >= TimeInterval(minutes * 60)
     }
 }

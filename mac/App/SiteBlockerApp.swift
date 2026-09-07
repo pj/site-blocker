@@ -112,6 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.updateUsageItem()
             }
         }
+
+        #if AUTO_OPEN_WINDOW
+        showManagementWindow()   // dev builds open the rules window on launch for quick review
+        #endif
     }
 
     @objc private func toggleLock() {

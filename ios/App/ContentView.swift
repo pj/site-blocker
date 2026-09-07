@@ -1,8 +1,9 @@
 import SwiftUI
 import RulesEngine
 
-/// Top level: a list of **site lists**. Each drills down to an editor with the list's domains, its
-/// default, and an ordered sublist of Allow/Deny **rules** (first active rule wins).
+/// Top level: a list of **site lists** (shared `SiteList` model). Each drills down to an editor with
+/// the list's domains, its default, and an ordered sublist of Allow/Deny **rules** (first active rule
+/// wins).
 struct ContentView: View {
     @EnvironmentObject private var store: MobileStore
     @AppStorage("configURL") private var configURL = ""
@@ -20,7 +21,10 @@ struct ContentView: View {
 
                 Section("Site lists") {
                     ForEach($store.lists) { $list in
-                        NavigationLink { ListEditView(list: $list) } label: { ListRow(list: list) }
+                        NavigationLink { ListEditView(list: $list) } label: {
+                            ListRow(list: list, isBlocked: store.blockedListIDs.contains(list.id))
+                        }
+                        .listRowBackground(listTint(list))
                     }
                     .onDelete { $0.map { store.lists[$0] }.forEach(store.delete) }
                     .onMove { store.moveLists(from: $0, to: $1) }
@@ -85,7 +89,7 @@ struct ContentView: View {
                 Text(importStatus).font(.caption).foregroundStyle(importFailed ? .red : .secondary)
             }
         } header: { Text("Sync") } footer: {
-            Text("Importing replaces your lists with the shared config from your Mac (each becomes a list with one Allow rule).")
+            Text("Importing replaces your lists with the shared config from your Mac.")
         }
     }
 
@@ -105,6 +109,13 @@ struct ContentView: View {
         }
     }
 
+    /// Subtle row tint mirroring the desktop: grey when off, red when blocked now, green when open.
+    private func listTint(_ list: SiteList) -> Color {
+        if !list.isEnabled { return Color.secondary.opacity(0.10) }
+        if store.blockedListIDs.contains(list.id) { return Color.red.opacity(0.10) }
+        return Color.green.opacity(0.08)
+    }
+
     static func minutes(_ seconds: TimeInterval) -> String {
         var mins = Int(seconds / 60)
         if seconds.truncatingRemainder(dividingBy: 60) > 0 { mins += 1 }
@@ -119,80 +130,191 @@ struct ContentView: View {
 
 private struct ListRow: View {
     let list: SiteList
+    let isBlocked: Bool
     var body: some View {
         HStack {
-            Circle().fill(list.isEnabled ? Color.green : Color.secondary).frame(width: 8, height: 8)
+            Circle().fill(status.color).frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 2) {
                 Text(list.name.isEmpty ? "Untitled" : list.name)
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
+            Spacer()
+            Text(status.label).font(.caption2.weight(.semibold)).foregroundStyle(status.color)
         }
     }
+    /// Live state, mirroring the desktop: Off (disabled), Blocked now, or Open now.
+    private var status: (color: Color, label: String) {
+        if !list.isEnabled { return (.secondary, "Off") }
+        if isBlocked { return (.red, "Blocked") }
+        return (.green, "Open")
+    }
     private var subtitle: String {
-        let sites = "\(list.domains.count) site\(list.domains.count == 1 ? "" : "s")"
+        let n = list.targets.count
+        let sites = "\(n) site\(n == 1 ? "" : "s")"
         let rules = "\(list.rules.count) rule\(list.rules.count == 1 ? "" : "s")"
-        return "\(sites) · \(rules) · default \(list.defaultAllowed ? "Allowed" : "Blocked")"
+        return "\(sites) · \(rules)"
     }
 }
 
 // MARK: - List editor
 
 private struct ListEditView: View {
+    @EnvironmentObject private var store: MobileStore
     @Binding var list: SiteList
+
+    private enum Kind: Hashable { case manual, url }
+    @State private var kind: Kind = .manual
     @State private var domainsText = ""
+    @State private var urlText = ""
 
     var body: some View {
         Form {
             Section {
                 TextField("Name", text: $list.name)
                 Toggle("Enabled", isOn: $list.isEnabled)
-                Picker("When no rule matches", selection: $list.defaultAllowed) {
-                    Text("Blocked").tag(false)
-                    Text("Allowed").tag(true)
-                }
             }
 
             Section {
                 ForEach($list.rules) { $rule in
-                    NavigationLink { RuleEditView(rule: $rule) } label: { RuleSummaryRow(rule: rule) }
+                    let isDefault = rule.id == list.rules.last?.id
+                    let isActive = list.isEnabled && store.activeRuleID(for: list) == rule.id
+                    // The default is a pure catch-all: edited inline (Allow/Deny) like on desktop,
+                    // rather than drilling into a near-empty editor. Real rules push their editor.
+                    Group {
+                        if isDefault {
+                            DefaultRuleRow(action: $rule.action, isActive: isActive)
+                        } else {
+                            NavigationLink { RuleEditView(rule: $rule) } label: {
+                                RuleSummaryRow(rule: rule, isActive: isActive)
+                            }
+                        }
+                    }
+                    // The last rule is the catch-all default: always present, pinned last.
+                    .deleteDisabled(isDefault)
+                    .moveDisabled(isDefault)
                 }
-                .onDelete { list.rules.remove(atOffsets: $0) }
-                .onMove { list.rules.move(fromOffsets: $0, toOffset: $1) }
-                Button { list.rules.append(ListRule()) } label: { Label("Add Rule", systemImage: "plus") }
+                .onDelete { offsets in
+                    let last = list.rules.count - 1
+                    list.rules.remove(atOffsets: IndexSet(offsets.filter { $0 != last }))
+                }
+                .onMove { source, destination in
+                    // Keep the default pinned at the bottom — nothing moves below it.
+                    list.rules.move(fromOffsets: source, toOffset: min(destination, list.rules.count - 1))
+                }
+                Button { list.rules.insert(ListRule(), at: max(0, list.rules.count - 1)) } label: {
+                    Label("Add Rule", systemImage: "plus")
+                }
             } header: {
                 Text("Rules (first active rule wins)")
             } footer: {
-                Text("Checked top to bottom; the first rule active right now decides. If none match, the default applies.")
+                Text("Checked top to bottom; the first rule active right now decides. The last rule is the default and always applies.")
             }
 
             Section {
-                TextEditor(text: $domainsText)
-                    .frame(minHeight: 140).autocorrectionDisabled()
-                    .textInputAutocapitalization(.never).font(.body.monospaced())
+                Picker("Source", selection: $kind) {
+                    Text("Typed").tag(Kind.manual)
+                    Text("URL").tag(Kind.url)
+                }
+                .pickerStyle(.segmented)
+
+                if kind == .manual {
+                    TextEditor(text: $domainsText)
+                        .frame(minHeight: 140).autocorrectionDisabled()
+                        .textInputAutocapitalization(.never).font(.body.monospaced())
+                } else {
+                    TextField("https://example.com/blocklist.txt", text: $urlText)
+                        .autocorrectionDisabled().textInputAutocapitalization(.never).keyboardType(.URL)
+                    HStack {
+                        Button("Apply / Refresh") { applyURL() }
+                            .disabled(URL(string: urlText.trimmingCharacters(in: .whitespaces)) == nil)
+                        Spacer()
+                        Text("\(list.targets.count) sites loaded").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             } header: { Text("Websites") } footer: {
-                Text("One domain per line, or hosts format. # ! ; comments are handled.")
+                Text(kind == .manual
+                     ? "One domain per line, or hosts format. # ! ; comments are handled."
+                     : "A blocklist URL — fetched now and refreshed periodically. The last list is kept if a fetch fails.")
             }
         }
         .navigationTitle(list.name.isEmpty ? "List" : list.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { EditButton() }
-        .onAppear { domainsText = list.domains.joined(separator: "\n") }
-        .onChange(of: domainsText) { newValue in list.domains = SiteRuleset.parse(newValue) }
+        .onAppear {
+            if case .remote(let url) = list.source { kind = .url; urlText = url.absoluteString }
+            else { kind = .manual }
+            domainsText = list.targets.map(\.domain).joined(separator: "\n")
+        }
+        .onChange(of: domainsText) { newValue in
+            guard kind == .manual else { return }
+            let hosts = SiteRuleset.parse(newValue).map { HostPattern($0) }
+            list.targets = hosts
+            list.source = .manual(hosts)
+        }
+    }
+
+    private func applyURL() {
+        let trimmed = urlText.trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: trimmed), url.scheme == "http" || url.scheme == "https" else { return }
+        list.source = .remote(url)
+        store.resolveRemoteSources(force: true)
     }
 }
 
 private struct RuleSummaryRow: View {
     let rule: ListRule
+    var isActive = false
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: rule.action == .allow ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundStyle(rule.action == .allow ? .green : .red)
-                .opacity(rule.isEnabled ? 1 : 0.35)
             VStack(alignment: .leading, spacing: 2) {
                 Text(rule.action == .allow ? "Allow" : "Deny").font(.body)
                 Text(RuleFormat.schedule(rule)).font(.caption).foregroundStyle(.secondary)
             }
+            if isActive { Spacer(); ActiveBadge() }
         }
+    }
+}
+
+/// The list's catch-all default, edited inline like the desktop chip: a green/red Allow/Deny capsule
+/// with a menu to switch. It always applies (condition stays `.always`), so it carries no schedule.
+private struct DefaultRuleRow: View {
+    @Binding var action: RuleAction
+    var isActive = false
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.turn.down.right").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Default").font(.body)
+                Text("everything else").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if isActive { ActiveBadge() }
+            Menu {
+                Button { action = .allow } label: { Label("Allow", systemImage: "checkmark.circle.fill") }
+                Button { action = .deny } label: { Label("Deny", systemImage: "xmark.circle.fill") }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: action == .allow ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .font(.caption2)
+                    Text(action == .allow ? "Allow" : "Deny").font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Capsule().fill(action == .allow ? Color.green : Color.red))
+            }
+        }
+    }
+}
+
+/// Small green pill marking the rule that's deciding the list right now.
+private struct ActiveBadge: View {
+    var body: some View {
+        Text("Active now")
+            .font(.caption2.weight(.semibold)).foregroundStyle(.green)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(Capsule().fill(Color.green.opacity(0.15)))
     }
 }
 
@@ -200,6 +322,13 @@ private struct RuleSummaryRow: View {
 
 private struct RuleEditView: View {
     @Binding var rule: ListRule
+    @State private var schedule: RuleSchedule
+
+    init(rule: Binding<ListRule>) {
+        _rule = rule
+        _schedule = State(initialValue: RuleSchedule(condition: rule.wrappedValue.condition,
+                                                     dailyLimit: rule.wrappedValue.dailyLimit))
+    }
 
     var body: some View {
         Form {
@@ -209,16 +338,15 @@ private struct RuleEditView: View {
                     Text("Deny").tag(RuleAction.deny)
                 }
                 .pickerStyle(.segmented)
-                Toggle("Enabled", isOn: $rule.isEnabled)
             } footer: {
                 Text(rule.action == .allow ? "Allow these sites while this rule is active."
                                            : "Block these sites while this rule is active.")
             }
 
             Section {
-                DaysPicker(days: $rule.days)
-                Toggle("Time of day", isOn: $rule.timeEnabled)
-                if rule.timeEnabled {
+                DaysPicker(days: $schedule.days)
+                Toggle("Time of day", isOn: $schedule.timeEnabled)
+                if schedule.timeEnabled {
                     HStack {
                         DatePicker("From", selection: minutesBinding(\.startMinutes),
                                    displayedComponents: .hourAndMinute)
@@ -232,13 +360,10 @@ private struct RuleEditView: View {
 
             if rule.action == .allow {
                 Section {
-                    Toggle("Daily limit (Face ID)", isOn: Binding(
-                        get: { rule.dailyLimitMinutes != nil },
-                        set: { rule.dailyLimitMinutes = $0 ? (rule.dailyLimitMinutes ?? 30) : nil }))
-                    if let minutes = rule.dailyLimitMinutes {
-                        Stepper("\(minutes) min/day", value: Binding(
-                            get: { minutes },
-                            set: { rule.dailyLimitMinutes = $0 }), in: 5...240, step: 5)
+                    Toggle("Daily limit (Face ID)", isOn: $schedule.quotaEnabled)
+                    if schedule.quotaEnabled {
+                        Stepper("\(schedule.quotaMinutes) min/day",
+                                value: $schedule.quotaMinutes, in: 5...240, step: 5)
                     }
                 } footer: {
                     Text("With a limit, these sites need a Face ID unlock and stay open until the shared daily budget is spent.")
@@ -247,35 +372,41 @@ private struct RuleEditView: View {
         }
         .navigationTitle(rule.action == .allow ? "Allow rule" : "Deny rule")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: schedule) { _ in commit() }
+        .onChange(of: rule.action) { _ in commit() }
+    }
+
+    private func commit() {
+        rule.condition = schedule.condition
+        rule.dailyLimit = rule.action == .allow ? schedule.dailyLimit : nil
     }
 
     private func minutesBinding(_ keyPath: WritableKeyPath<TimeWindow, Int>) -> Binding<Date> {
         Binding {
             Calendar.current.startOfDay(for: Date())
-                .addingTimeInterval(TimeInterval(rule.window[keyPath: keyPath] * 60))
+                .addingTimeInterval(TimeInterval(schedule.window[keyPath: keyPath] * 60))
         } set: { date in
             let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
-            rule.window[keyPath: keyPath] = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+            schedule.window[keyPath: keyPath] = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         }
     }
 }
 
 // MARK: - Shared bits
 
-/// Human-readable schedule summary for a rule row.
 enum RuleFormat {
     static func schedule(_ rule: ListRule) -> String {
-        var parts: [String] = [days(rule.days)]
-        if rule.timeEnabled {
-            parts.append("\(clock(rule.window.startMinutes))–\(clock(rule.window.endMinutes))")
-        }
-        if let m = rule.dailyLimitMinutes { parts.append("\(m) min/day") }
-        if !rule.isEnabled { parts.append("(off)") }
+        let s = RuleSchedule(condition: rule.condition, dailyLimit: rule.dailyLimit)
+        var parts: [String] = [days(s.days)]
+        if s.timeEnabled { parts.append("\(clock(s.window.startMinutes))–\(clock(s.window.endMinutes))") }
+        if s.quotaEnabled { parts.append("\(s.quotaMinutes) min/day") }
         return parts.joined(separator: " · ")
     }
     private static func days(_ set: Set<Weekday>) -> String {
         if set.isEmpty { return "never" }
         if set == Set(Weekday.allCases) { return "every day" }
+        if set == [.monday, .tuesday, .wednesday, .thursday, .friday] { return "weekdays" }
+        if set == [.saturday, .sunday] { return "weekends" }
         return Weekday.allCases.filter(set.contains).map(\.shortLabel).joined(separator: ", ")
     }
     private static func clock(_ minutes: Int) -> String {
@@ -283,7 +414,6 @@ enum RuleFormat {
     }
 }
 
-/// Seven letter toggles, like Screen Time's day picker.
 private struct DaysPicker: View {
     @Binding var days: Set<Weekday>
     var body: some View {

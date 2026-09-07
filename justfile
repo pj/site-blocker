@@ -119,6 +119,11 @@ build: generate
         -destination 'platform=macOS' -derivedDataPath {{ddata}} \
         CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build | xcbeautify
 
+# Headless macOS persistence tests
+mac-test: generate
+    xcodebuild test -project {{project}} -scheme SiteBlockerTests \
+        -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO | xcbeautify
+
 # Build then launch the app
 run: build
     open {{appdir}}
