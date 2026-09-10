@@ -22,8 +22,8 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # Bump on any change that must reload the *system extension*: the OS only swaps in a new
     # extension binary when its version increases. App + extension stay in lockstep.
-    MARKETING_VERSION: "2.7"
-    CURRENT_PROJECT_VERSION: "18"
+    MARKETING_VERSION: "2.8"
+    CURRENT_PROJECT_VERSION: "19"
 
 targets:
   SiteBlocker:

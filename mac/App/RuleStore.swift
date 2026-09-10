@@ -24,6 +24,10 @@ final class RuleStore: ObservableObject {
     /// starts locked — the safe default.
     @Published private(set) var isUnlocked = false
 
+    /// Master switch: when true, all blocking is paused across every list. Not persisted, so every
+    /// launch starts enforcing — the safe default.
+    @Published private(set) var isDisabled = false
+
     /// Whether unlocking would open at least one limited list right now. Drives the Unlock control.
     @Published private(set) var canUnlock = false
 
@@ -141,6 +145,24 @@ final class RuleStore: ObservableObject {
     func refresh() {
         drainViewingTime()
 
+        // Master switch off → nothing is blocked, regardless of any list's rules.
+        if isDisabled {
+            canUnlock = false
+            openAccessActive = false
+            isUnlocked = false
+            unlockedSince = nil
+            blockedListIDs = []
+            blockedNow = []
+            enforcer.apply(blockedPatterns: [])
+            if lastBlocked != [] {
+                lastBlocked = []
+                persistence.writeSnapshot(PolicySnapshot(blockedPatterns: []))
+            }
+            let total = usage.total()
+            if totalUsageToday != total { totalUsageToday = total }
+            return
+        }
+
         let context = liveContext()
         let engine = ListEngine(lists: lists)
 
@@ -257,6 +279,18 @@ final class RuleStore: ObservableObject {
 
     func toggleLock() async {
         if isUnlocked { lock() } else { await unlock() }
+    }
+
+    /// Master enable/disable for all blocking. Disabling loosens enforcement, so it's gated behind
+    /// Touch ID; re-enabling is stricter and needs no auth.
+    func toggleDisabledAuthenticated() async {
+        if !isDisabled {
+            guard await Authentication.confirm(reason: "disable all blocking") else { return }
+            isDisabled = true
+        } else {
+            isDisabled = false
+        }
+        refresh()
     }
 
     func unlock() async {

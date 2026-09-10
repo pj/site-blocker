@@ -15,11 +15,10 @@ final class PersistenceTests: XCTestCase {
     func testSaveLoadRoundTrip() {
         let dir = tempDir()
         let lists = [
-            SiteList(name: "Social", targets: ["x.com", "reddit.com"],
-                     rules: [ListRule(action: .allow, condition: .onDaysOfWeek([.saturday])),
-                             ListRule(action: .deny)]),
+            SiteList(name: "Social", targets: ["x.com", "reddit.com"], isBlockedByDefault: true,
+                     rules: [ListRule(condition: .onDaysOfWeek([.saturday]))]),
             SiteList(name: "Ads", targets: [], source: .remote(URL(string: "https://e.com/l.txt")!),
-                     rules: [ListRule(action: .deny)]),
+                     isBlockedByDefault: true, rules: []),
         ]
         PersistenceController(overrideDir: dir).save(lists: lists, usage: DailyUsage())
         let loaded = PersistenceController(overrideDir: dir).load()
@@ -37,11 +36,10 @@ final class PersistenceTests: XCTestCase {
         let list = loaded.lists[0]
         XCTAssertEqual(list.name, "YouTube")
         XCTAssertEqual(list.targets.map(\.domain), ["youtube.com"])
-        // Allow rule (schedule + limit) followed by the catch-all Deny.
-        XCTAssertEqual(list.rules.count, 2)
-        XCTAssertEqual(list.rules[0].action, .allow)
+        // Blocked by default with one allow-window exception carrying the limit.
+        XCTAssertTrue(list.isBlockedByDefault)
+        XCTAssertEqual(list.rules.count, 1)
         XCTAssertEqual(list.rules[0].dailyLimit, 1200)
-        XCTAssertEqual(list.rules[1].action, .deny)
 
         // Migration wrote lists.json, so a second load reads it directly (no re-migration).
         XCTAssertTrue(FileManager.default.fileExists(

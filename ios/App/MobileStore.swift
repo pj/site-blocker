@@ -31,6 +31,8 @@ final class MobileStore: ObservableObject {
     @Published private(set) var budget: MobileEnforcer.BudgetStatus? = MobileEnforcer.budgetStatus()
     /// The lists blocked right now, for the live status dot/tint on each row.
     @Published private(set) var blockedListIDs: Set<UUID> = MobileEnforcer.blockedListIDs()
+    /// Master switch: whether blocking is paused across every list.
+    @Published private(set) var isDisabled: Bool = MobileEnforcer.isBlockingDisabled
 
     /// Fires while foregrounded so a schedule boundary crossed with the app open takes effect promptly.
     private var tick: Timer?
@@ -47,7 +49,7 @@ final class MobileStore: ObservableObject {
 
     // MARK: List CRUD (the editor commits a whole list, including its ordered rules)
 
-    func addList() { lists.append(SiteList(name: "New List", rules: [SiteList.defaultRule()])) }
+    func addList() { lists.append(SiteList(name: "New List")) }
     func delete(_ list: SiteList) { lists.removeAll { $0.id == list.id } }
     func update(_ list: SiteList) {
         guard let idx = lists.firstIndex(where: { $0.id == list.id }) else { return }
@@ -118,6 +120,18 @@ final class MobileStore: ObservableObject {
         reevaluate()
     }
 
+    /// Master enable/disable for all blocking. Disabling loosens enforcement, so it needs Face ID;
+    /// re-enabling is stricter and needs none.
+    @discardableResult
+    func setDisabled(_ on: Bool) async -> Bool {
+        if on {
+            guard await Authentication.confirm(reason: "Disable all blocking") else { return false }
+        }
+        MobileEnforcer.isBlockingDisabled = on
+        reevaluate()
+        return true
+    }
+
     // MARK: Wake signals
 
     func reevaluate() {
@@ -131,6 +145,7 @@ final class MobileStore: ObservableObject {
         canUnlock = MobileEnforcer.canUnlockNow()
         budget = MobileEnforcer.budgetStatus()
         blockedListIDs = MobileEnforcer.blockedListIDs()
+        isDisabled = MobileEnforcer.isBlockingDisabled
         reloadControl()
     }
 

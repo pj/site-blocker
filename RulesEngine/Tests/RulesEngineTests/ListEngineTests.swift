@@ -1,7 +1,8 @@
 import XCTest
 @testable import RulesEngine
 
-/// Resolution tests for the redesigned `SiteList` / `ListEngine` (first active rule wins).
+/// Resolution tests for the `SiteList` / `ListEngine` model: a per-list base state with exceptions
+/// that flip it (first active exception wins).
 final class ListEngineTests: XCTestCase {
 
     private var utc: Calendar {
@@ -16,51 +17,61 @@ final class ListEngineTests: XCTestCase {
     private func ctx(_ d: Date, used: TimeInterval = 0) -> RuleContext {
         RuleContext(now: d, calendar: utc, unblockedTimeToday: used)
     }
-    private func allow(_ condition: Condition = .always, limit: TimeInterval? = nil) -> ListRule {
-        ListRule(action: .allow, condition: condition, dailyLimit: limit)
-    }
-    private func deny(_ condition: Condition = .always) -> ListRule {
-        ListRule(action: .deny, condition: condition)
+    private func exception(_ condition: Condition = .always, limit: TimeInterval? = nil) -> ListRule {
+        ListRule(condition: condition, dailyLimit: limit)
     }
     private let mon = Weekday.monday, sat = Weekday.saturday, sun = Weekday.sunday
 
-    private func list(_ targets: [HostPattern], rules: [ListRule] = []) -> SiteList {
-        SiteList(name: "L", targets: targets, rules: rules)
+    private func list(_ targets: [HostPattern], blockedByDefault: Bool = true,
+                      rules: [ListRule] = []) -> SiteList {
+        SiteList(name: "L", targets: targets, isBlockedByDefault: blockedByDefault, rules: rules)
     }
     private func decide(_ l: SiteList, unlocked: Bool = false, used: TimeInterval = 0,
                         at d: Date) -> SiteList.Decision {
         ListEngine(lists: [l]).decision(for: l, unlocked: unlocked, in: ctx(d, used: used))
     }
 
-    func testFallbackIsAllowedAndCatchAllDenyBlocks() {
-        // No rule matches → not blocked.
-        XCTAssertEqual(decide(list(["x.com"]), at: at(2026, 7, 6)), .allowed)
-        // A catch-all Deny (the auto-added default) → blocked.
-        XCTAssertEqual(decide(list(["x.com"], rules: [deny(.always)]), at: at(2026, 7, 6)), .blocked)
+    func testBaseStateWithNoExceptions() {
+        XCTAssertEqual(decide(list(["x.com"], blockedByDefault: true), at: at(2026, 7, 6)), .blocked)
+        XCTAssertEqual(decide(list(["x.com"], blockedByDefault: false), at: at(2026, 7, 6)), .allowed)
     }
 
-    func testFirstActiveRuleWins() {
-        let l = list(["x.com"], rules: [allow(.onDaysOfWeek([mon])), deny(.onDaysOfWeek([mon]))])
-        XCTAssertEqual(decide(l, at: at(2026, 7, 6)), .allowed)   // allow is first & active
+    func testAllowWindowOpensBlockedList() {
+        // Blocked by default, opened on Saturdays.
+        let l = list(["x.com"], blockedByDefault: true, rules: [exception(.onDaysOfWeek([sat]))])
+        XCTAssertEqual(decide(l, at: at(2026, 7, 6)), .blocked)    // Monday → base
+        XCTAssertEqual(decide(l, at: at(2026, 7, 11)), .allowed)   // Saturday → allow window
     }
 
-    func testDenyOnItsDays() {
-        let l = list(["x.com"], rules: [deny(.onDaysOfWeek([mon]))])
-        XCTAssertEqual(decide(l, at: at(2026, 7, 6)), .blocked)   // Monday → deny
-        XCTAssertEqual(decide(l, at: at(2026, 7, 11)), .allowed)  // Saturday → no match → allowed
+    func testBlockWindowClosesAllowedList() {
+        // Allowed by default, blocked on Mondays.
+        let l = list(["x.com"], blockedByDefault: false, rules: [exception(.onDaysOfWeek([mon]))])
+        XCTAssertEqual(decide(l, at: at(2026, 7, 6)), .blocked)    // Monday → block window
+        XCTAssertEqual(decide(l, at: at(2026, 7, 11)), .allowed)   // Saturday → base
     }
 
-    func testLimitedAllowGatesOnUnlockAndBudget() {
-        let l = list(["x.com"], rules: [allow(.onDaysOfWeek([mon]), limit: 1800)])   // 30 min
+    func testFirstActiveExceptionWins() {
+        // Two overlapping windows on Monday; the first decides — but both flip a blocked list to
+        // allowed, so the meaningful check is that ordering picks the first one (asserted via limit).
+        let l = list(["x.com"], blockedByDefault: true,
+                     rules: [exception(.onDaysOfWeek([mon])), exception(.onDaysOfWeek([mon]), limit: 60)])
+        XCTAssertEqual(ListEngine().activeRule(for: l, in: ctx(at(2026, 7, 6)))?.id, l.rules[0].id)
+        XCTAssertEqual(decide(l, at: at(2026, 7, 6)), .allowed)    // first window is unlimited → open
+    }
+
+    func testLimitedAllowWindowGatesOnUnlockAndBudget() {
+        let l = list(["x.com"], blockedByDefault: true,
+                     rules: [exception(.onDaysOfWeek([mon]), limit: 1800)])  // 30 min
         XCTAssertEqual(decide(l, at: at(2026, 7, 6)), .blocked)                        // locked
         XCTAssertEqual(decide(l, unlocked: true, used: 600, at: at(2026, 7, 6)), .allowed)  // budget left
         XCTAssertEqual(decide(l, unlocked: true, used: 1800, at: at(2026, 7, 6)), .blocked) // spent
     }
 
     func testBlockedPatternsUnionAndHelpers() {
-        let a = list(["a.com"], rules: [deny(.always)])                         // blocked
-        let b = list(["b.com"])                                                 // no rule → allowed
-        let c = list(["c.com"], rules: [allow(.always, limit: 1800)])           // limited: locked → blocked
+        let a = list(["a.com"], blockedByDefault: true)                                   // blocked
+        let b = list(["b.com"], blockedByDefault: false)                                  // allowed
+        let c = list(["c.com"], blockedByDefault: true,
+                     rules: [exception(.always, limit: 1800)])                            // limited: locked → blocked
         let engine = ListEngine(lists: [a, b, c])
         let context = ctx(at(2026, 7, 6))
         XCTAssertEqual(engine.blockedPatterns(unlocked: false, in: context), ["a.com", "c.com"])
@@ -74,12 +85,11 @@ final class ListEngineTests: XCTestCase {
                         condition: .onDaysOfWeek([mon]), dailyLimit: 1800)
         let migrated = SiteList(migrating: rule)
         XCTAssertEqual(migrated.targets, ["y.com"])
-        // The schedule Allow rule followed by a catch-all Deny.
-        XCTAssertEqual(migrated.rules.count, 2)
-        XCTAssertEqual(migrated.rules[0].action, .allow)
+        // Blocked by default with a single limited allow-window on its old schedule.
+        XCTAssertTrue(migrated.isBlockedByDefault)
+        XCTAssertEqual(migrated.rules.count, 1)
+        XCTAssertEqual(migrated.rules[0].condition, .onDaysOfWeek([mon]))
         XCTAssertEqual(migrated.rules[0].dailyLimit, 1800)
-        XCTAssertEqual(migrated.rules[1].action, .deny)
-        XCTAssertEqual(migrated.rules[1].condition, .always)
         // Same behavior as the old allow-rule: locked → blocked, unlocked+budget → allowed.
         XCTAssertEqual(decide(migrated, at: at(2026, 7, 6)), .blocked)
         XCTAssertEqual(decide(migrated, unlocked: true, at: at(2026, 7, 6)), .allowed)

@@ -32,11 +32,11 @@ def collect(cond, out):
 
 
 def rule_to_config(r):
+    """An exception window: days + time + optional daily budget (no allow/deny — it's implied)."""
     sched = {}
     collect(r.get("condition", {}), sched)
     limit = r.get("dailyLimit")
     return {
-        "action": r.get("action", "deny"),
         "days": sched.get("days"),            # None = every day
         "window": sched.get("window"),        # None = all day
         "dailyLimitMinutes": round(limit / 60) if limit else None,
@@ -46,6 +46,7 @@ def rule_to_config(r):
 def list_to_config(l):
     source = l.get("source", {})
     entry = {"name": l.get("name", ""), "enabled": l.get("isEnabled", True),
+             "blockedByDefault": l.get("isBlockedByDefault", True),
              "domains": [], "blocklistUrl": None,
              "rules": [rule_to_config(r) for r in l.get("rules", [])]}
     # Remote-sourced lists sync the URL reference (not the resolved list); others inline their hosts.

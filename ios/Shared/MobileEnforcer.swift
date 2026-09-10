@@ -69,6 +69,13 @@ enum MobileEnforcer {
 
     static var isUnlocked: Bool { unlockedSince != nil }
 
+    /// Master switch: when true, blocking is paused across every list. Persisted in the App Group
+    /// (like the unlock state) so it stays put until the user re-enables it.
+    static var isBlockingDisabled: Bool {
+        get { defaults?.bool(forKey: "blockingDisabled") ?? false }
+        set { defaults?.set(newValue, forKey: "blockingDisabled") }
+    }
+
     static func setUnlocked(_ on: Bool) {
         chargeUsage()                       // flush any time from the stretch ending now
         unlockedSince = on ? Date() : nil
@@ -99,12 +106,14 @@ enum MobileEnforcer {
     }
 
     static func blockedDomainsNow(now: Date = Date()) -> [String] {
-        ListEngine(lists: loadLists())
+        guard !isBlockingDisabled else { return [] }
+        return ListEngine(lists: loadLists())
             .blockedPatterns(unlocked: isUnlocked, in: context(now: now)).map(\.domain)
     }
 
     /// The ids of the lists that are blocked right now (drives the live status in the UI).
     static func blockedListIDs(now: Date = Date()) -> Set<UUID> {
+        guard !isBlockingDisabled else { return [] }
         let ctx = context(now: now)
         let engine = ListEngine()
         return Set(loadLists()
@@ -120,7 +129,8 @@ enum MobileEnforcer {
 
     /// True when unlocking would open at least one list (a limited Allow rule is active with budget).
     static func canUnlockNow(now: Date = Date()) -> Bool {
-        ListEngine(lists: loadLists()).canUnlock(in: context(now: now))
+        guard !isBlockingDisabled else { return false }
+        return ListEngine(lists: loadLists()).canUnlock(in: context(now: now))
     }
 
     /// True when some list is open via a no-limit Allow rule (auto-open, no unlock needed).
@@ -142,9 +152,10 @@ enum MobileEnforcer {
     }
 
     static func budgetStatus(now: Date = Date()) -> BudgetStatus? {
-        let limit = loadLists().filter(\.isEnabled).flatMap(\.rules)
-            .filter { $0.action == .allow }
-            .compactMap(\.dailyLimit).max()
+        guard !isBlockingDisabled else { return nil }
+        // Budgets live on allow-window exceptions of blocked-by-default lists.
+        let limit = loadLists().filter { $0.isEnabled && $0.isBlockedByDefault }
+            .flatMap(\.rules).compactMap(\.dailyLimit).max()
         guard let limit else { return nil }
         return BudgetStatus(used: unblockedTimeToday(now: now), limit: limit)
     }

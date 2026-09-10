@@ -3,8 +3,9 @@ import Foundation
 /// The shared config the Mac publishes (a public gist, via `just publish-config`) and either app
 /// imports from a URL. The Mac is the source of truth.
 ///
-/// v2 carries **site lists** (`lists`), each with an ordered set of Allow/Deny rules. v1 (`rules`,
-/// one schedule per list) is still decoded for a smooth transition — `toSiteLists()` handles both.
+/// v2 carries **site lists** (`lists`), each with a base state (`blockedByDefault`) and an ordered
+/// set of exception windows. v1 (`rules`, one schedule per list) is still decoded for a smooth
+/// transition — `toSiteLists()` handles both.
 public struct SyncedConfig: Codable, Sendable {
     public var version: Int
     public var updatedAt: String
@@ -38,16 +39,19 @@ public struct SyncedConfig: Codable, Sendable {
     public struct SyncedList: Codable, Sendable {
         public var name: String
         public var enabled: Bool
+        /// The list's base state. Optional for back-compat; absent decodes as blocked-by-default.
+        public var blockedByDefault: Bool?
         /// Inline domains (manual/file-sourced on the Mac). A `blocklistUrl` instead syncs the
         /// reference for big lists; importers fetch it.
         public var domains: [String]
         public var blocklistUrl: String?
+        /// Exception windows (each flips the base state while active).
         public var rules: [SyncedListRule]
 
-        public init(name: String, enabled: Bool, domains: [String], blocklistUrl: String? = nil,
-                    rules: [SyncedListRule]) {
-            self.name = name; self.enabled = enabled; self.domains = domains
-            self.blocklistUrl = blocklistUrl; self.rules = rules
+        public init(name: String, enabled: Bool, blockedByDefault: Bool = true, domains: [String],
+                    blocklistUrl: String? = nil, rules: [SyncedListRule]) {
+            self.name = name; self.enabled = enabled; self.blockedByDefault = blockedByDefault
+            self.domains = domains; self.blocklistUrl = blocklistUrl; self.rules = rules
         }
 
         public func toSiteList() -> SiteList {
@@ -60,20 +64,18 @@ public struct SyncedConfig: Codable, Sendable {
                 targets = inline; source = .manual(inline)
             }
             return SiteList(name: name, isEnabled: enabled, targets: targets, source: source,
+                            isBlockedByDefault: blockedByDefault ?? true,
                             rules: rules.map { $0.toListRule() })
         }
     }
 
     public struct SyncedListRule: Codable, Sendable {
-        public var action: String           // "allow" / "deny"
         public var days: [String]?          // nil = every day; present (incl. empty) = a constraint
         public var window: Window?          // nil = all day
         public var dailyLimitMinutes: Int?
 
-        public init(action: String, days: [String]? = nil,
-                    window: Window? = nil, dailyLimitMinutes: Int? = nil) {
-            self.action = action; self.days = days
-            self.window = window; self.dailyLimitMinutes = dailyLimitMinutes
+        public init(days: [String]? = nil, window: Window? = nil, dailyLimitMinutes: Int? = nil) {
+            self.days = days; self.window = window; self.dailyLimitMinutes = dailyLimitMinutes
         }
 
         public func toListRule() -> ListRule {
@@ -86,8 +88,7 @@ public struct SyncedConfig: Codable, Sendable {
             }
             let condition: Condition = parts.isEmpty ? .always
                 : (parts.count == 1 ? parts[0] : .allOf(parts))
-            return ListRule(action: action == "deny" ? .deny : .allow,
-                            condition: condition,
+            return ListRule(condition: condition,
                             dailyLimit: dailyLimitMinutes.map { TimeInterval($0 * 60) })
         }
 

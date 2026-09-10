@@ -2,8 +2,8 @@ import SwiftUI
 import RulesEngine
 
 /// The management screen. Each **site list** is a card: its sites (a manual/file/URL source), a
-/// default (Allowed/Blocked when no rule is active), and an *ordered* list of Allow/Deny **rules**
-/// (first active rule wins). Rules OR together within their action; edit fully in place.
+/// base state (Blocked/Allowed by default), and an *ordered* list of **exceptions** that flip the
+/// base while active (first active exception wins). Exceptions OR together; edit fully in place.
 struct ContentView: View {
     @EnvironmentObject private var store: RuleStore
 
@@ -18,7 +18,17 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(store.isUnlocked ? .green : .red)
-                .disabled(!store.isUnlocked && !store.canUnlock)
+                .disabled(store.isDisabled || (!store.isUnlocked && !store.canUnlock))
+
+                Button {
+                    Task { await store.toggleDisabledAuthenticated() }
+                } label: {
+                    Label(store.isDisabled ? "Enable blocking" : "Disable blocking",
+                          systemImage: store.isDisabled ? "play.fill" : "pause.fill")
+                }
+                .buttonStyle(.bordered)
+                .help(store.isDisabled ? "Resume blocking on all lists"
+                                       : "Pause blocking on all lists (requires authentication)")
 
                 Text(statusText).font(.callout).foregroundStyle(.secondary)
                 Spacer()
@@ -45,7 +55,7 @@ struct ContentView: View {
 
             Divider()
             HStack {
-                Button { store.add(SiteList(name: "New List", rules: [SiteList.defaultRule()])) } label: {
+                Button { store.add(SiteList(name: "New List")) } label: {
                     Label("Add List", systemImage: "plus")
                 }
                 Spacer()
@@ -56,6 +66,7 @@ struct ContentView: View {
     }
 
     private var statusText: String {
+        if store.isDisabled { return "Blocking disabled" }
         if store.isUnlocked { return "Unlocked" }
         if store.openAccessActive {
             return store.canUnlock ? "Some sites open · unlock available" : "Some sites open now"
@@ -92,15 +103,12 @@ private struct ListRowView: View {
             // 3. List (sites source).
             sitesButton.frame(width: 130, alignment: .leading)
 
-            // 4. Sub rules.
-            RulesColumn(list: $list)
+            // 4. Default (base state).
+            BaseStatePicker(isBlocked: $list.isBlockedByDefault)
+                .frame(width: 150)
 
-            // 5. Enable / disable (right side).
-            Toggle("", isOn: Binding(
-                get: { list.isEnabled },
-                set: { _ in Task { await store.toggleListAuthenticated(list) } }))
-                .toggleStyle(.switch).labelsHidden()
-                .help(list.isEnabled ? "Disable list (auth)" : "Enable list (auth)")
+            // 5. Exceptions.
+            RulesColumn(list: $list)
 
             // 6. Delete (right side).
             Button { Task { await store.deleteAuthenticated(list) } } label: {
@@ -114,16 +122,16 @@ private struct ListRowView: View {
     }
 
     private var statusColor: Color {
-        if !list.isEnabled { return .secondary }
+        if store.isDisabled { return .secondary }
         return store.blockedListIDs.contains(list.id) ? .red : .green
     }
     private var statusText: String {
-        if !list.isEnabled { return "Disabled" }
+        if store.isDisabled { return "Blocking disabled" }
         return store.blockedListIDs.contains(list.id) ? "Blocked now" : "Open now"
     }
     /// A faint tint of the current status behind the whole row.
     private var rowColor: Color {
-        if !list.isEnabled { return Color.gray.opacity(0.14) }
+        if store.isDisabled { return Color.gray.opacity(0.14) }
         return store.blockedListIDs.contains(list.id)
             ? Color.red.opacity(0.09) : Color.green.opacity(0.08)
     }
@@ -154,8 +162,8 @@ private struct ListRowView: View {
     }
 }
 
-/// Column 2: the ordered rules. The last rule is the catch-all default — always present, pinned at
-/// the bottom, and not removable; "Add Rule" inserts a new rule just before it.
+/// The list's ordered exceptions (each flips the base state while active), then "Add exception".
+/// An exception has no allow/deny of its own — its effect is implied by the base state.
 private struct RulesColumn: View {
     @Binding var list: SiteList
     var body: some View {
@@ -163,51 +171,56 @@ private struct RulesColumn: View {
             ForEach($list.rules) { $rule in
                 RuleRow(rule: $rule,
                         isFirst: rule.id == list.rules.first?.id,
-                        isDefault: rule.id == list.rules.last?.id) {
+                        baseBlocked: list.isBlockedByDefault) {
                     list.rules.removeAll { $0.id == rule.id }
                 }
             }
-            Button { list.rules.insert(ListRule(), at: max(0, list.rules.count - 1)) } label: {
-                Label("Add Rule", systemImage: "plus").font(.callout)
+            Button { list.rules.append(ListRule()) } label: {
+                Label("Add exception", systemImage: "plus")
             }
-            .buttonStyle(.borderless).padding(.leading, 4)
+            .buttonStyle(.bordered).controlSize(.small)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-/// Green Allow / red Deny chip with a menu to switch. Shared by rules and the list default.
-private struct ActionChip: View {
-    let isAllow: Bool
-    var help: String = ""
-    let onSet: (Bool) -> Void
+/// The list's base state as a 2-segment control: red "Blocked" / green "Allowed".
+private struct BaseStatePicker: View {
+    @Binding var isBlocked: Bool
     var body: some View {
-        Menu {
-            Button("Allow") { onSet(true) }
-            Button("Deny") { onSet(false) }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: isAllow ? "checkmark.circle.fill" : "xmark.circle.fill").font(.caption2)
-                Text(isAllow ? "Allow" : "Deny").font(.caption.weight(.semibold))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Capsule().fill(isAllow ? Color.green : Color.red))
+        HStack(spacing: 0) {
+            segment("Blocked", selected: isBlocked, color: .red) { isBlocked = true }
+            Divider().frame(height: 20)
+            segment("Allowed", selected: !isBlocked, color: .green) { isBlocked = false }
         }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-        .help(help)
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.secondary.opacity(0.25)))
+        .help("The list's default when no exception is active")
+    }
+
+    private func segment(_ title: String, selected: Bool, color: Color,
+                         _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.caption.weight(.semibold))
+                .foregroundStyle(selected ? .white : .secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+                .background(selected ? color : Color.secondary.opacity(0.08))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
-
-// MARK: - Rule row (one Allow/Deny rule, chip-based)
+// MARK: - Exception row (a schedule that flips the base state, chip-based)
 
 private struct RuleRow: View {
     @EnvironmentObject private var store: RuleStore
     @Binding var rule: ListRule
     let isFirst: Bool
-    /// The last rule in a list is the catch-all default: pure Allow/Deny, no conditions, not removable.
-    let isDefault: Bool
+    /// The list's base state: exceptions are Allow-windows when blocked, Block-windows when allowed.
+    /// A daily limit only applies to an Allow-window.
+    let baseBlocked: Bool
     let onDelete: () -> Void
 
     @State private var schedule: RuleSchedule
@@ -221,10 +234,10 @@ private struct RuleRow: View {
     @State private var daysChipWidth: CGFloat = 0
     @State private var frozenDaysWidth: CGFloat?
 
-    init(rule: Binding<ListRule>, isFirst: Bool, isDefault: Bool, onDelete: @escaping () -> Void) {
+    init(rule: Binding<ListRule>, isFirst: Bool, baseBlocked: Bool, onDelete: @escaping () -> Void) {
         _rule = rule
         self.isFirst = isFirst
-        self.isDefault = isDefault
+        self.baseBlocked = baseBlocked
         self.onDelete = onDelete
         _schedule = State(initialValue: RuleSchedule(condition: rule.wrappedValue.condition,
                                                      dailyLimit: rule.wrappedValue.dailyLimit))
@@ -232,34 +245,26 @@ private struct RuleRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text("OR").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
-                .opacity(isFirst ? 0 : 1)   // hidden on the first rule, but keeps the box aligned
-                .help("A list's rules are OR'd — any matching rule applies")
+            if !isFirst {   // OR only precedes subsequent rows; the first stays flush left
+                Text("OR").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+                    .help("A list's exceptions are OR'd — any matching one applies")
+            }
 
             chipBox
 
             Button(action: onDelete) { Image(systemName: "minus.circle") }
-                .buttonStyle(.borderless).help("Remove rule")
-                .opacity(isDefault ? 0 : 1)          // the default (last) rule can't be removed
-                .disabled(isDefault)                  // but keep its slot so rows stay aligned
+                .buttonStyle(.borderless).help("Remove exception")
 
             Spacer(minLength: 0)
         }
-        .padding(.leading, 4)
         .onChange(of: schedule) { commit() }
-        .onChange(of: rule.action) { commit() }
+        .onChange(of: baseBlocked) { commit() }   // a block-window carries no limit
     }
 
-    /// The rule's Allow/Deny action then its conditions (AND'd), boxed together.
-    /// The default rule is a pure catch-all: just the Allow/Deny action, no conditions.
+    /// The exception's conditions (AND'd), then a plain-text indicator of its implied effect.
     private var chipBox: some View {
         HStack(spacing: 6) {
-            actionChip
-
-            if !isDefault {
-            Divider().frame(height: 16)
-
-            // Days chip (always present — a rule always applies on some days).
+            // Days chip (always present — an exception always applies on some days).
             Chip(icon: "calendar", text: daysText, tint: schedule.days.isEmpty ? .orange : .secondary)
                 { frozenDaysWidth = daysChipWidth; editingDays = true }
                 .frame(width: frozenDaysWidth, alignment: .leading)   // pinned while the popover is open
@@ -282,8 +287,8 @@ private struct RuleRow: View {
                     }
             }
 
-            // Daily-limit chip (Allow rules only) — ANDed with the other conditions.
-            if rule.action == .allow && schedule.quotaEnabled {
+            // Daily-limit chip (Allow-windows only) — ANDed with the other conditions.
+            if baseBlocked && schedule.quotaEnabled {
                 andLabel
                 Chip(icon: "hourglass", text: "\(schedule.quotaMinutes)m/day",
                      tint: exhausted ? .red : .secondary,
@@ -301,7 +306,7 @@ private struct RuleRow: View {
                     if !schedule.timeEnabled {
                         Button("Time of day") { schedule.timeEnabled = true; editingTime = true }
                     }
-                    if rule.action == .allow && !schedule.quotaEnabled {
+                    if baseBlocked && !schedule.quotaEnabled {
                         Button("Daily limit") { schedule.quotaEnabled = true; editingLimit = true }
                     }
                 } label: {
@@ -310,7 +315,12 @@ private struct RuleRow: View {
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .help("Add a condition (AND)")
             }
-            }   // end if !isDefault
+
+            Divider().frame(height: 16)
+            Text(baseBlocked ? "Allow" : "Block")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(baseBlocked ? .green : .red)
+                .help(baseBlocked ? "Opens these sites while active" : "Blocks these sites while active")
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
@@ -319,7 +329,7 @@ private struct RuleRow: View {
     }
 
     private var canAdd: Bool {
-        !schedule.timeEnabled || (rule.action == .allow && !schedule.quotaEnabled)
+        !schedule.timeEnabled || (baseBlocked && !schedule.quotaEnabled)
     }
     private var exhausted: Bool {
         schedule.quotaEnabled && store.totalUsageToday >= TimeInterval(schedule.quotaMinutes * 60)
@@ -344,22 +354,9 @@ private struct RuleRow: View {
             .help("All of a rule's conditions must match (AND)")
     }
 
-    /// Allow/Deny as a chip at the start of the box.
-    private var actionChip: some View {
-        ActionChip(isAllow: rule.action == .allow,
-                   help: "Allow or deny these sites when this rule matches") {
-            rule.action = $0 ? .allow : .deny
-        }
-    }
-
     private func commit() {
-        if isDefault {                       // catch-all: always active, no limit
-            rule.condition = .always
-            rule.dailyLimit = nil
-            return
-        }
         rule.condition = schedule.condition
-        rule.dailyLimit = rule.action == .allow ? schedule.dailyLimit : nil
+        rule.dailyLimit = baseBlocked ? schedule.dailyLimit : nil   // a block-window carries no limit
     }
 }
 

@@ -8,14 +8,13 @@ final class SyncedConfigV2Tests: XCTestCase {
         try JSONDecoder().decode(SyncedConfig.self, from: Data(json.utf8))
     }
 
-    func testDecodesV2ListsWithOrderedRules() throws {
+    func testDecodesV2ListWithBaseStateAndExceptions() throws {
         let json = """
         {"version":2,"updatedAt":"now","lists":[
-          {"name":"Social","enabled":true,"domains":["x.com","reddit.com"],"defaultAllowed":false,
+          {"name":"Social","enabled":true,"blockedByDefault":true,"domains":["x.com","reddit.com"],
            "rules":[
-             {"action":"allow","enabled":true,"days":["sat","sun"]},
-             {"action":"allow","enabled":true,"window":{"start":"12:00","end":"13:00"},"dailyLimitMinutes":30},
-             {"action":"deny","enabled":true,"days":["mon","tue","wed","thu","fri"]}
+             {"days":["sat","sun"]},
+             {"window":{"start":"12:00","end":"13:00"},"dailyLimitMinutes":30}
            ]}
         ]}
         """
@@ -23,20 +22,40 @@ final class SyncedConfigV2Tests: XCTestCase {
         XCTAssertEqual(lists.count, 1)
         let list = lists[0]
         XCTAssertEqual(list.name, "Social")
+        XCTAssertTrue(list.isBlockedByDefault)
         XCTAssertEqual(Set(list.targets.map(\.domain)), ["x.com", "reddit.com"])
-        XCTAssertEqual(list.rules.count, 3)
-        XCTAssertEqual(list.rules[0].action, .allow)
+        XCTAssertEqual(list.rules.count, 2)
         XCTAssertEqual(list.rules[0].condition, .onDaysOfWeek([.saturday, .sunday]))
         XCTAssertEqual(list.rules[1].dailyLimit, 30 * 60)
-        XCTAssertEqual(list.rules[2].action, .deny)
         if case .manual = list.source {} else { XCTFail("expected manual source") }
+    }
+
+    func testDecodesAllowedByDefaultList() throws {
+        let json = """
+        {"version":2,"updatedAt":"now","lists":[
+          {"name":"News","enabled":true,"blockedByDefault":false,"domains":["news.example"],
+           "rules":[{"days":["mon","tue","wed","thu","fri"],"window":{"start":"09:00","end":"17:00"}}]}
+        ]}
+        """
+        let list = try decode(json).toSiteLists()[0]
+        XCTAssertFalse(list.isBlockedByDefault)
+        XCTAssertEqual(list.rules.count, 1)   // a block-window exception
+    }
+
+    func testMissingBlockedByDefaultDecodesAsBlocked() throws {
+        let json = """
+        {"version":2,"updatedAt":"now","lists":[
+          {"name":"Social","enabled":true,"domains":["x.com"],"rules":[]}
+        ]}
+        """
+        XCTAssertTrue(try decode(json).toSiteLists()[0].isBlockedByDefault)
     }
 
     func testV2RemoteBlocklistBecomesRemoteSource() throws {
         let json = """
         {"version":2,"updatedAt":"now","lists":[
-          {"name":"Ads","enabled":true,"domains":[],"blocklistUrl":"https://example.com/list.txt",
-           "defaultAllowed":false,"rules":[{"action":"deny","enabled":true}]}
+          {"name":"Ads","enabled":true,"blockedByDefault":true,"domains":[],
+           "blocklistUrl":"https://example.com/list.txt","rules":[]}
         ]}
         """
         let list = try decode(json).toSiteLists()[0]
@@ -44,7 +63,7 @@ final class SyncedConfigV2Tests: XCTestCase {
             XCTAssertEqual(url.absoluteString, "https://example.com/list.txt")
         } else { XCTFail("expected remote source") }
         XCTAssertTrue(list.targets.isEmpty)
-        XCTAssertEqual(list.rules[0].action, .deny)
+        XCTAssertTrue(list.rules.isEmpty)   // no exceptions → always blocked
     }
 
     func testDecodesLegacyV1Rules() throws {
@@ -57,27 +76,24 @@ final class SyncedConfigV2Tests: XCTestCase {
         XCTAssertEqual(lists.count, 1)
         XCTAssertEqual(lists[0].name, "YT")
         XCTAssertEqual(lists[0].targets.map(\.domain), ["youtube.com"])
-        // v1 → an Allow rule with the limit, followed by the catch-all Deny.
-        XCTAssertEqual(lists[0].rules.count, 2)
-        XCTAssertEqual(lists[0].rules[0].action, .allow)
+        // v1 → blocked-by-default with one allow-window exception carrying the limit.
+        XCTAssertTrue(lists[0].isBlockedByDefault)
+        XCTAssertEqual(lists[0].rules.count, 1)
         XCTAssertEqual(lists[0].rules[0].dailyLimit, 20 * 60)
-        XCTAssertEqual(lists[0].rules[1].action, .deny)
     }
 
     /// End-to-end: a v2 config JSON → decode → toSiteLists → ListEngine → the blocked set, the exact
-    /// pipeline both apps run. Social is deny Mon–Fri but allow at Sat/Sun and (unlocked) at lunch;
+    /// pipeline both apps run. Social is blocked by default but opens Sat/Sun and (unlocked) at lunch;
     /// Ads is always blocked.
     func testConfigToBlockedPatternsPipeline() throws {
         let json = """
         {"version":2,"updatedAt":"now","lists":[
-          {"name":"Social","enabled":true,"domains":["x.com","reddit.com"],"defaultAllowed":false,
+          {"name":"Social","enabled":true,"blockedByDefault":true,"domains":["x.com","reddit.com"],
            "rules":[
-             {"action":"allow","enabled":true,"days":["sat","sun"]},
-             {"action":"allow","enabled":true,"window":{"start":"12:00","end":"13:00"},"dailyLimitMinutes":30},
-             {"action":"deny","enabled":true,"days":["mon","tue","wed","thu","fri"]}
+             {"days":["sat","sun"]},
+             {"window":{"start":"12:00","end":"13:00"},"dailyLimitMinutes":30}
            ]},
-          {"name":"Ads","enabled":true,"domains":["ads.example"],"defaultAllowed":false,
-           "rules":[{"action":"deny","enabled":true}]}
+          {"name":"Ads","enabled":true,"blockedByDefault":true,"domains":["ads.example"],"rules":[]}
         ]}
         """
         let engine = ListEngine(lists: try decode(json).toSiteLists())
@@ -91,21 +107,21 @@ final class SyncedConfigV2Tests: XCTestCase {
             Set(engine.blockedPatterns(unlocked: unlocked,
                 in: RuleContext(now: date, calendar: utc, unblockedTimeToday: used)).map(\.domain))
         }
-        // Mon 09:00 → Social denied, Ads always denied.
+        // Mon 09:00 → Social blocked (base), Ads always blocked.
         XCTAssertEqual(blocked(at(6, 9)), ["x.com", "reddit.com", "ads.example"])
-        // Sat 15:00 → Social allowed (rule 1); Ads still denied.
+        // Sat 15:00 → Social opens (weekend exception); Ads still blocked.
         XCTAssertEqual(blocked(at(11, 15)), ["ads.example"])
-        // Mon lunch, unlocked with budget → Social opens (rule 2); Ads denied.
+        // Mon lunch, unlocked with budget → Social opens (limited exception); Ads blocked.
         XCTAssertEqual(blocked(at(6, 12), unlocked: true), ["ads.example"])
-        // Mon lunch, locked → Social blocked (limited rule needs unlock).
+        // Mon lunch, locked → Social blocked (limited exception needs unlock).
         XCTAssertEqual(blocked(at(6, 12)), ["x.com", "reddit.com", "ads.example"])
     }
 
-    func testRuleWithNoDaysIsAlways_AndPresentEmptyIsNever() {
+    func testExceptionWithNoDaysIsAlways_AndPresentEmptyIsNever() {
         // nil days → .always
-        XCTAssertEqual(SyncedConfig.SyncedListRule(action: "allow").toListRule().condition, .always)
+        XCTAssertEqual(SyncedConfig.SyncedListRule().toListRule().condition, .always)
         // present-but-empty days → never
-        XCTAssertEqual(SyncedConfig.SyncedListRule(action: "deny", days: []).toListRule().condition,
+        XCTAssertEqual(SyncedConfig.SyncedListRule(days: []).toListRule().condition,
                        .onDaysOfWeek([]))
     }
 }

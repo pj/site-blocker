@@ -1,34 +1,27 @@
 import Foundation
 
-/// The redesigned model (shared by both apps): a **site list** is a named set of target hosts plus
-/// an *ordered* list of **rules**. Each rule is an Allow or Deny that applies while its `condition`
-/// (days + optional time-of-day) is true, optionally bounded by a daily time budget. The list also
-/// carries a **default** used when no rule is active.
+/// The model (shared by both apps): a **site list** is a named set of target hosts with a **base
+/// state** — blocked or allowed by default — plus an *ordered* list of **exceptions**. An exception
+/// (`ListRule`) has no allow/deny of its own; while its `condition` (days + optional time-of-day) is
+/// true it simply *flips* the base state: an allow-window on a blocked list, or a block-window on an
+/// allowed list. An allow-window may carry a daily time budget.
 ///
-/// Resolution is *first active rule wins*: walk the rules top-to-bottom; the first enabled rule whose
-/// condition matches the current moment decides the list's fate (Deny → blocked; Allow → allowed,
-/// subject to its `dailyLimit` + the unlock state). If none match, fall back to the list default.
-/// Evaluation is pure (`ListEngine`); the app supplies the clock/usage via `RuleContext`.
-
-public enum RuleAction: String, Codable, Sendable, CaseIterable {
-    case allow
-    case deny
-}
+/// Resolution: the first exception whose condition matches the current moment flips the base;
+/// otherwise the base stands. Evaluation is pure (`ListEngine`); the app supplies the clock/usage via
+/// `RuleContext`.
 
 public struct ListRule: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
-    public var action: RuleAction
-    /// When the rule applies — days + optional time-of-day (never a budget; that's `dailyLimit`).
-    /// `.always` = whenever; `.onDaysOfWeek([])` = never.
+    /// When this exception applies — days + optional time-of-day. `.always` = whenever;
+    /// `.onDaysOfWeek([])` = never.
     public var condition: Condition
-    /// Optional daily budget (seconds) for an Allow rule: allowed until the shared pool passes it,
-    /// and gated behind the manual unlock. Ignored for Deny rules.
+    /// Optional daily budget (seconds). Meaningful only for an *allow* window (a list that's blocked
+    /// by default): the sites open until the shared pool passes this, gated behind the manual unlock.
+    /// Ignored when the list is allowed by default (a block-window has no budget).
     public var dailyLimit: TimeInterval?
 
-    public init(id: UUID = UUID(), action: RuleAction = .deny,
-                condition: Condition = .always, dailyLimit: TimeInterval? = nil) {
+    public init(id: UUID = UUID(), condition: Condition = .always, dailyLimit: TimeInterval? = nil) {
         self.id = id
-        self.action = action
         self.condition = condition
         self.dailyLimit = dailyLimit
     }
@@ -42,35 +35,34 @@ public struct SiteList: Identifiable, Codable, Hashable, Sendable {
     public var targets: [HostPattern]
     /// Where the targets come from: hand-edited, a local file, or a downloaded blocklist.
     public var source: TargetSource
+    /// The list's base state. Its `rules` are exceptions that flip this while active.
+    public var isBlockedByDefault: Bool
     public var rules: [ListRule]
 
     public init(id: UUID = UUID(), name: String = "", isEnabled: Bool = true,
                 targets: [HostPattern] = [], source: TargetSource? = nil,
-                rules: [ListRule] = []) {
+                isBlockedByDefault: Bool = true, rules: [ListRule] = []) {
         self.id = id
         self.name = name
         self.isEnabled = isEnabled
         self.targets = targets
         self.source = source ?? .manual(targets)
+        self.isBlockedByDefault = isBlockedByDefault
         self.rules = rules
     }
-
-    /// A new list's starting rule — a catch-all Deny (blocked by default), which the UI adds
-    /// automatically. It's an ordinary rule the user can edit or remove like any other.
-    public static func defaultRule() -> ListRule { ListRule(action: .deny, condition: .always) }
 
     public enum Decision: Equatable, Sendable { case allowed, blocked }
 }
 
 public extension SiteList {
-    /// Migrate a legacy single-schedule `Rule` into a list with its Allow rule (schedule + limit)
-    /// followed by a catch-all Deny — reproducing the old "blocked by default, allowed in the
-    /// window" behavior with ordinary rules.
+    /// Migrate a legacy single-schedule `Rule` into a blocked-by-default list with one allow-window
+    /// exception carrying its schedule + limit — reproducing the old "blocked by default, allowed in
+    /// the window" behavior.
     init(migrating rule: Rule) {
         self.init(id: rule.id, name: rule.name, isEnabled: rule.isEnabled,
                   targets: rule.targets, source: rule.source,
-                  rules: [ListRule(action: .allow, condition: rule.condition, dailyLimit: rule.dailyLimit),
-                          ListRule(action: .deny, condition: .always)])
+                  isBlockedByDefault: true,
+                  rules: [ListRule(condition: rule.condition, dailyLimit: rule.dailyLimit)])
     }
 }
 
@@ -80,26 +72,26 @@ public struct ListEngine: Sendable {
 
     public init(lists: [SiteList] = []) { self.lists = lists }
 
-    /// The current decision for one list: first active rule wins, else the default. `unlocked` +
-    /// the shared `unblockedTimeToday` in `context` gate limited Allow rules.
+    /// The current decision for one list: the first active exception flips the base state, else the
+    /// base stands. `unlocked` + the shared `unblockedTimeToday` in `context` gate a budgeted
+    /// allow-window (only relevant on a blocked-by-default list).
     public func decision(for list: SiteList, unlocked: Bool, in context: RuleContext) -> SiteList.Decision {
         guard list.isEnabled else { return .allowed }
-        for rule in list.rules {
-            guard rule.condition.evaluate(in: context) else { continue }
-            switch rule.action {
-            case .deny:
-                return .blocked
-            case .allow:
-                guard let limit = rule.dailyLimit else { return .allowed }
+        if let exception = list.rules.first(where: { $0.condition.evaluate(in: context) }) {
+            if list.isBlockedByDefault {
+                // Allow-window: opens the list, subject to any daily budget + the unlock state.
+                guard let limit = exception.dailyLimit else { return .allowed }
                 return (unlocked && context.unblockedTimeToday < limit) ? .allowed : .blocked
+            } else {
+                return .blocked   // block-window on an allowed list
             }
         }
-        return .allowed   // no rule matched → not blocked
+        return list.isBlockedByDefault ? .blocked : .allowed
     }
 
-    /// The rule currently deciding this list — the first whose condition is active right now — or
-    /// `nil` if none match (the list falls through to "allowed") or the list is disabled. A limited
-    /// Allow rule counts as active here even when its budget is spent: it's still the rule in force.
+    /// The exception currently in force for this list — the first whose condition is active right
+    /// now — or `nil` if none match (the list's base state stands) or the list is disabled. A
+    /// budgeted allow-window counts as active here even when its budget is spent.
     public func activeRule(for list: SiteList, in context: RuleContext) -> ListRule? {
         guard list.isEnabled else { return nil }
         return list.rules.first { $0.condition.evaluate(in: context) }
@@ -135,8 +127,8 @@ public struct ListEngine: Sendable {
     /// Allow rules that are the active decision right now. `nil` when nothing budgeted is active.
     public func sessionRemaining(in context: RuleContext) -> TimeInterval? {
         var best: TimeInterval?
-        for list in lists where list.isEnabled {
-            for rule in list.rules where rule.action == .allow {
+        for list in lists where list.isEnabled && list.isBlockedByDefault {
+            for rule in list.rules {
                 guard let limit = rule.dailyLimit, rule.condition.evaluate(in: context) else { continue }
                 let remaining = max(0, limit - context.unblockedTimeToday)
                 best = max(best ?? 0, remaining)

@@ -143,17 +143,19 @@ struct PersistenceController {
         if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: snapshotURL) }
     }
 
-    /// Seed content for a fresh install: sites blocked by default, viewable inside a rule's window
-    /// and up to its daily budget.
+    /// Seed content for a fresh install: sites blocked by default, opened by an allow-window
+    /// exception on its schedule and up to its daily budget.
     static let starterLists: [SiteList] = [
         SiteList(name: "Socials — weekday lunch",
                  targets: ["twitter.com", "x.com", "reddit.com", "instagram.com"],
-                 rules: [ListRule(action: .allow, condition: .allOf([
+                 isBlockedByDefault: true,
+                 rules: [ListRule(condition: .allOf([
                      .onDaysOfWeek([.monday, .tuesday, .wednesday, .thursday, .friday]),
                      .duringTimeOfDay(TimeWindow(startHour: 12, endHour: 13)),
                  ]), dailyLimit: 30 * 60)]),
         SiteList(name: "YouTube — 20 min/day",
                  targets: ["youtube.com"],
-                 rules: [ListRule(action: .allow, condition: .always, dailyLimit: 20 * 60)]),
+                 isBlockedByDefault: true,
+                 rules: [ListRule(condition: .always, dailyLimit: 20 * 60)]),
     ]
 }
