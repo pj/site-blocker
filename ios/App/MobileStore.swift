@@ -45,6 +45,7 @@ final class MobileStore: ObservableObject {
         lists = MobileEnforcer.loadLists()
         reevaluate()
         resolveRemoteSources()
+        ensureCalendarAccessIfNeeded()
     }
 
     // MARK: List CRUD (the editor commits a whole list, including its ordered rules)
@@ -152,6 +153,23 @@ final class MobileStore: ObservableObject {
     /// The rule currently deciding `list` (drives the "active now" marker in the rule editor).
     func activeRuleID(for list: SiteList) -> UUID? { MobileEnforcer.activeRuleID(for: list) }
 
+    // MARK: Calendar-based exceptions
+
+    /// Calendars the user can attach to an exception (empty until access is granted).
+    func availableCalendars() -> [CalendarSource] { MobileCalendar.availableCalendars() }
+
+    /// Prompt for calendar access, then re-evaluate (calendar exceptions may now resolve).
+    func requestCalendarAccess() async {
+        _ = await MobileCalendar.requestAccess()
+        reevaluate()
+    }
+
+    /// If any list references a calendar and we lack access, prompt for it.
+    func ensureCalendarAccessIfNeeded() {
+        guard !lists.referencedCalendars.isEmpty, !MobileCalendar.authorized else { return }
+        Task { await requestCalendarAccess() }
+    }
+
     /// Refresh the Control Center toggle so it reflects the current state.
     private func reloadControl() {
         if #available(iOS 18.0, *) {
@@ -162,6 +180,7 @@ final class MobileStore: ObservableObject {
     func onForeground() {
         reevaluate()
         resolveRemoteSources()
+        ensureCalendarAccessIfNeeded()
         tick?.invalidate()
         tick = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.reevaluate() }

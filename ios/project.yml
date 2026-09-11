@@ -46,6 +46,10 @@ targets:
       path: App/Info.plist
       properties:
         UILaunchScreen: {}
+        # Read-only calendar access, for exceptions that open lists on a calendar's event days
+        # (e.g. a US-holidays calendar). SiteBlocker never creates or changes events.
+        NSCalendarsUsageDescription: SiteBlocker checks your selected calendars so it can open lists on their event days (for example, holidays).
+        NSCalendarsFullAccessUsageDescription: SiteBlocker checks your selected calendars so it can open lists on their event days (for example, holidays).
         # Reference the build settings (not a baked literal) so `just ios-release`'s timestamp
         # CURRENT_PROJECT_VERSION override flows into CFBundleVersion — TestFlight needs each upload's
         # build number to increase. The app and its extension must carry the *same* version.

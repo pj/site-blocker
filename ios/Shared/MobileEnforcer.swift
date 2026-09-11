@@ -102,7 +102,11 @@ enum MobileEnforcer {
     // MARK: Evaluation (via the shared ListEngine)
 
     private static func context(now: Date = Date()) -> RuleContext {
-        RuleContext(now: now, calendar: calendar, unblockedTimeToday: unblockedTimeToday(now: now))
+        let calendarIDs = MobileCalendar.activeCalendarIDs(
+            among: Set(loadLists().referencedCalendars.map(\.id)), now: now)
+        return RuleContext(now: now, calendar: calendar,
+                           unblockedTimeToday: unblockedTimeToday(now: now),
+                           activeCalendarIDs: calendarIDs)
     }
 
     static func blockedDomainsNow(now: Date = Date()) -> [String] {

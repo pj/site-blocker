@@ -215,7 +215,14 @@ private struct ListEditView: View {
                 }
                 .onDelete { list.rules.remove(atOffsets: $0) }
                 .onMove { list.rules.move(fromOffsets: $0, toOffset: $1) }
-                Button { list.rules.append(ListRule()) } label: {
+                Menu {
+                    Button("Schedule") { list.rules.append(ListRule()) }
+                    Button("From calendar…") {
+                        list.rules.append(ListRule(condition: .duringCalendarEvent(
+                            CalendarSource(id: "", title: "Choose calendar"))))
+                        store.ensureCalendarAccessIfNeeded()
+                    }
+                } label: {
                     Label("Add exception", systemImage: "plus")
                 }
             } header: {
@@ -290,11 +297,14 @@ private struct RuleSummaryRow: View {
                 .foregroundStyle(allows ? .green : .red)
             VStack(alignment: .leading, spacing: 2) {
                 Text(allows ? "Allow" : "Block").font(.body)
-                Text(RuleFormat.schedule(rule, showLimit: baseBlocked))
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
             if isActive { Spacer(); ActiveBadge() }
         }
+    }
+    private var subtitle: String {
+        if case .duringCalendarEvent(let s) = rule.condition { return "Calendar · \(s.title)" }
+        return RuleFormat.schedule(rule, showLimit: baseBlocked)
     }
 }
 
@@ -311,6 +321,7 @@ private struct ActiveBadge: View {
 // MARK: - Rule editor
 
 private struct RuleEditView: View {
+    @EnvironmentObject private var store: MobileStore
     @Binding var rule: ListRule
     /// The list's base state: this exception is an Allow-window when blocked, a Block-window when
     /// allowed. A daily limit only applies to an Allow-window.
@@ -324,8 +335,56 @@ private struct RuleEditView: View {
                                                      dailyLimit: rule.wrappedValue.dailyLimit))
     }
 
+    private var isCalendar: Bool {
+        if case .duringCalendarEvent = rule.condition { return true }
+        return false
+    }
+
     var body: some View {
         Form {
+            if isCalendar { calendarSection } else { scheduleSections }
+        }
+        .navigationTitle(isCalendar ? (baseBlocked ? "Calendar allow" : "Calendar block")
+                         : (baseBlocked ? "Allow window" : "Block window"))
+        .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: schedule) { _ in commit() }
+        .onAppear { if isCalendar && store.availableCalendars().isEmpty {
+            Task { await store.requestCalendarAccess() } } }
+    }
+
+    /// Pick which calendar's event days drive this exception.
+    @ViewBuilder private var calendarSection: some View {
+        Section {
+            let calendars = store.availableCalendars()
+            if calendars.isEmpty {
+                Button("Allow calendar access…") { Task { await store.requestCalendarAccess() } }
+            } else {
+                ForEach(calendars) { cal in
+                    Button {
+                        rule.condition = .duringCalendarEvent(cal)
+                    } label: {
+                        HStack {
+                            Text(cal.title).foregroundStyle(.primary)
+                            Spacer()
+                            if currentCalendarID == cal.id {
+                                Image(systemName: "checkmark").foregroundStyle(.tint)
+                            }
+                        }
+                    }
+                }
+            }
+        } header: { Text("Calendar") } footer: {
+            Text(baseBlocked ? "Opens these sites on days this calendar has an event (e.g. holidays)."
+                             : "Blocks these sites on days this calendar has an event.")
+        }
+    }
+
+    private var currentCalendarID: String? {
+        if case .duringCalendarEvent(let s) = rule.condition { return s.id }
+        return nil
+    }
+
+    @ViewBuilder private var scheduleSections: some View {
             Section {
                 DaysPicker(days: $schedule.days)
                 Toggle("Time of day", isOn: $schedule.timeEnabled)
@@ -354,12 +413,10 @@ private struct RuleEditView: View {
                 }
             }
         }
-        .navigationTitle(baseBlocked ? "Allow window" : "Block window")
-        .navigationBarTitleDisplayMode(.inline)
-        .onChange(of: schedule) { _ in commit() }
-    }
 
     private func commit() {
+        // Calendar exceptions manage their own condition via the picker.
+        if isCalendar { rule.dailyLimit = nil; return }
         rule.condition = schedule.condition
         rule.dailyLimit = baseBlocked ? schedule.dailyLimit : nil   // a block-window carries no limit
     }

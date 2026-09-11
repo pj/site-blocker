@@ -14,7 +14,11 @@ let sourceLog = Logger(subsystem: "com.pauljohnson.siteblocker", category: "sour
 @MainActor
 final class RuleStore: ObservableObject {
     @Published var lists: [SiteList] {
-        didSet { persistence.save(lists: lists, usage: usage); refresh() }
+        didSet {
+            persistence.save(lists: lists, usage: usage)
+            refresh()
+            ensureCalendarAccessIfNeeded()
+        }
     }
 
     /// Host patterns actively blocked *right now*. Drives the status view.
@@ -44,6 +48,7 @@ final class RuleStore: ObservableObject {
     private var usage: DailyUsage
     private let enforcer: Enforcer
     private let persistence: PersistenceController
+    private let calendarResolver = CalendarResolver()
     private var timer: Timer?
     private var hotKey: GlobalHotKey?
 
@@ -77,6 +82,7 @@ final class RuleStore: ObservableObject {
         observeSleepWake()
         resolveSources(force: Set(lists.map(\.id)))
         refresh()
+        ensureCalendarAccessIfNeeded()
     }
 
     // MARK: iCloud + sleep/wake
@@ -138,7 +144,26 @@ final class RuleStore: ObservableObject {
     }
 
     private func liveContext(_ now: Date = Date()) -> RuleContext {
-        RuleContext(now: now, calendar: .current, unblockedTimeToday: usage.total(on: now))
+        let calendarIDs = calendarResolver.activeCalendarIDs(
+            among: Set(lists.referencedCalendars.map(\.id)), now: now)
+        return RuleContext(now: now, calendar: .current,
+                           unblockedTimeToday: usage.total(on: now),
+                           activeCalendarIDs: calendarIDs)
+    }
+
+    /// Calendars the user can attach to an exception (empty until calendar access is granted).
+    func availableCalendars() -> [CalendarSource] { calendarResolver.availableCalendars() }
+
+    /// Ensure calendar access if any list references a calendar; then re-evaluate.
+    func ensureCalendarAccessIfNeeded() {
+        guard !lists.referencedCalendars.isEmpty, !calendarResolver.authorized else { return }
+        Task { await calendarResolver.requestAccess(); refresh() }
+    }
+
+    /// Prompt for calendar access on demand (e.g. when the user opens the calendar picker).
+    func requestCalendarAccess() async {
+        await calendarResolver.requestAccess()
+        refresh()
     }
 
     /// Recompute the live blocked set, hand it to the enforcer, and refresh the shared snapshot.

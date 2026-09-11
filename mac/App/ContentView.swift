@@ -175,10 +175,15 @@ private struct RulesColumn: View {
                     list.rules.removeAll { $0.id == rule.id }
                 }
             }
-            Button { list.rules.append(ListRule()) } label: {
+            Menu {
+                Button("Schedule") { list.rules.append(ListRule()) }
+                Button("From calendar…") {
+                    list.rules.append(ListRule(condition: .duringCalendarEvent(CalendarSource(id: "", title: "Choose calendar"))))
+                }
+            } label: {
                 Label("Add exception", systemImage: "plus")
             }
-            .buttonStyle(.bordered).controlSize(.small)
+            .menuStyle(.borderlessButton).buttonStyle(.bordered).controlSize(.small).fixedSize()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -250,7 +255,7 @@ private struct RuleRow: View {
                     .help("A list's exceptions are OR'd — any matching one applies")
             }
 
-            chipBox
+            if isCalendarException { calendarBox } else { chipBox }
 
             Button(action: onDelete) { Image(systemName: "minus.circle") }
                 .buttonStyle(.borderless).help("Remove exception")
@@ -259,6 +264,47 @@ private struct RuleRow: View {
         }
         .onChange(of: schedule) { commit() }
         .onChange(of: baseBlocked) { commit() }   // a block-window carries no limit
+    }
+
+    private var isCalendarException: Bool {
+        if case .duringCalendarEvent = rule.condition { return true }
+        return false
+    }
+
+    /// A calendar-backed exception: pick the calendar whose event days flip the base state.
+    @ViewBuilder private var calendarBox: some View {
+        HStack(spacing: 6) {
+            Menu {
+                let calendars = store.availableCalendars()
+                if calendars.isEmpty {
+                    Button("Allow calendar access…") { Task { await store.requestCalendarAccess() } }
+                } else {
+                    ForEach(calendars) { cal in
+                        Button(cal.title) { rule.condition = .duringCalendarEvent(cal) }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "calendar").font(.caption2)
+                    Text(currentCalendarTitle).font(.caption)
+                }
+            }
+            .menuStyle(.borderlessButton).fixedSize()
+            .onAppear { if store.availableCalendars().isEmpty { Task { await store.requestCalendarAccess() } } }
+
+            Divider().frame(height: 16)
+            Text(baseBlocked ? "Allow" : "Block")
+                .font(.caption.weight(.semibold)).foregroundStyle(baseBlocked ? .green : .red)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.18)))
+        .fixedSize()
+    }
+
+    private var currentCalendarTitle: String {
+        if case .duringCalendarEvent(let source) = rule.condition { return source.title }
+        return "Choose calendar"
     }
 
     /// The exception's conditions (AND'd), then a plain-text indicator of its implied effect.
@@ -355,6 +401,9 @@ private struct RuleRow: View {
     }
 
     private func commit() {
+        // Calendar exceptions manage their own condition via the picker; only the schedule kind
+        // derives its condition from the editor here.
+        if isCalendarException { rule.dailyLimit = nil; return }
         rule.condition = schedule.condition
         rule.dailyLimit = baseBlocked ? schedule.dailyLimit : nil   // a block-window carries no limit
     }

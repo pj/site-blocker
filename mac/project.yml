@@ -46,6 +46,10 @@ targets:
         LSApplicationCategoryType: public.app-category.productivity
         NSSystemExtensionUsageDescription: SiteBlocker uses a content filter to block distracting sites according to your rules.
         NSAppleEventsUsageDescription: SiteBlocker closes browser tabs of sites that are currently blocked.
+        # Read-only calendar access, for exceptions that open lists on a calendar's event days
+        # (e.g. a US-holidays calendar). SiteBlocker never creates or changes events.
+        NSCalendarsUsageDescription: SiteBlocker checks your selected calendars so it can open lists on their event days (for example, holidays).
+        NSCalendarsFullAccessUsageDescription: SiteBlocker checks your selected calendars so it can open lists on their event days (for example, holidays).
         # Menu-bar / agent app: no Dock icon, no default window at launch.
         LSUIElement: true
         # Bump to force the OS to reload the system extension (see settings.base).
