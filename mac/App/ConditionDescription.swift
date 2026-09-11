@@ -19,6 +19,12 @@ extension Condition {
             return "from \(f.string(from: r.start)) to \(f.string(from: r.end))"
         case .afterUnblockedTime(let seconds):
             return "after \(Int(seconds / 60)) min of use today"
+        case .duringCalendarEvent(let source):
+            return "on “\(source.title)” calendar days"
+        case .duringFocus(let focus):
+            return "while “\(focus.name)” Focus is on"
+        case .atLocation(let region):
+            return "while at \(region.name)"
         case .not(let inner):
             return "not (\(inner.summary))"
         case .allOf(let cs):

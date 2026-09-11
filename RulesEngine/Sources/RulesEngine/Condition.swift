@@ -17,6 +17,14 @@ public indirect enum Condition: Codable, Hashable, Sendable {
     /// Block once today's accumulated unblocked time reaches `limit` seconds.
     case afterUnblockedTime(_ limit: TimeInterval)
 
+    /// True while the given calendar has an event active right now (resolved by the app via
+    /// `RuleContext.activeCalendarIDs`). E.g. a US-holidays calendar → true on holidays.
+    case duringCalendarEvent(CalendarSource)
+    /// True while the given Focus is active (resolved via `RuleContext.activeFocusIDs`).
+    case duringFocus(FocusSource)
+    /// True while the device is inside the given region (resolved via `RuleContext.insideRegionIDs`).
+    case atLocation(GeoRegion)
+
     case not(Condition)
     case allOf([Condition])
     case anyOf([Condition])
@@ -41,6 +49,24 @@ public indirect enum Condition: Codable, Hashable, Sendable {
         }
     }
 
+    /// The external-signal sources anywhere in this condition tree, so the app knows what to resolve.
+    public func collectSources() -> (calendars: [CalendarSource], focuses: [FocusSource], regions: [GeoRegion]) {
+        switch self {
+        case .duringCalendarEvent(let s): return ([s], [], [])
+        case .duringFocus(let f): return ([], [f], [])
+        case .atLocation(let r): return ([], [], [r])
+        case .not(let inner): return inner.collectSources()
+        case .allOf(let list), .anyOf(let list):
+            var c: [CalendarSource] = [], f: [FocusSource] = [], r: [GeoRegion] = []
+            for cond in list {
+                let x = cond.collectSources(); c += x.calendars; f += x.focuses; r += x.regions
+            }
+            return (c, f, r)
+        default:
+            return ([], [], [])
+        }
+    }
+
     public func evaluate(in context: RuleContext) -> Bool {
         switch self {
         case .always:
@@ -55,6 +81,12 @@ public indirect enum Condition: Codable, Hashable, Sendable {
             return range.contains(context.now)
         case .afterUnblockedTime(let limit):
             return context.unblockedTimeToday >= limit
+        case .duringCalendarEvent(let source):
+            return context.activeCalendarIDs.contains(source.id)
+        case .duringFocus(let focus):
+            return context.activeFocusIDs.contains(focus.id)
+        case .atLocation(let region):
+            return context.insideRegionIDs.contains(region.id)
         case .not(let inner):
             return !inner.evaluate(in: context)
         case .allOf(let conditions):
