@@ -222,6 +222,14 @@ private struct ListEditView: View {
                             CalendarSource(id: "", title: "Choose calendar"))))
                         store.ensureCalendarAccessIfNeeded()
                     }
+                    Button("From Focus…") {
+                        list.rules.append(ListRule(condition: .duringFocus(FocusSource(id: "", name: ""))))
+                    }
+                    Button("At location…") {
+                        list.rules.append(ListRule(condition: .atLocation(
+                            GeoRegion(name: "", latitude: 0, longitude: 0, radius: 150))))
+                        store.requestLocationAccess()
+                    }
                 } label: {
                     Label("Add exception", systemImage: "plus")
                 }
@@ -303,8 +311,12 @@ private struct RuleSummaryRow: View {
         }
     }
     private var subtitle: String {
-        if case .duringCalendarEvent(let s) = rule.condition { return "Calendar · \(s.title)" }
-        return RuleFormat.schedule(rule, showLimit: baseBlocked)
+        switch rule.condition {
+        case .duringCalendarEvent(let s): return "Calendar · \(s.title)"
+        case .duringFocus(let f):         return "Focus · \(f.name.isEmpty ? "unnamed" : f.name)"
+        case .atLocation(let r):          return "Location · \(r.name.isEmpty ? "unset" : r.name)"
+        default:                          return RuleFormat.schedule(rule, showLimit: baseBlocked)
+        }
     }
 }
 
@@ -335,21 +347,94 @@ private struct RuleEditView: View {
                                                      dailyLimit: rule.wrappedValue.dailyLimit))
     }
 
-    private var isCalendar: Bool {
-        if case .duringCalendarEvent = rule.condition { return true }
-        return false
+    private enum Kind { case schedule, calendar, focus, location }
+    private var kind: Kind {
+        switch rule.condition {
+        case .duringCalendarEvent: return .calendar
+        case .duringFocus:         return .focus
+        case .atLocation:          return .location
+        default:                   return .schedule
+        }
     }
 
     var body: some View {
         Form {
-            if isCalendar { calendarSection } else { scheduleSections }
+            switch kind {
+            case .calendar: calendarSection
+            case .focus:    focusSection
+            case .location: locationSection
+            case .schedule: scheduleSections
+            }
         }
-        .navigationTitle(isCalendar ? (baseBlocked ? "Calendar allow" : "Calendar block")
-                         : (baseBlocked ? "Allow window" : "Block window"))
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .onChange(of: schedule) { _ in commit() }
-        .onAppear { if isCalendar && store.availableCalendars().isEmpty {
+        .onAppear { if kind == .calendar && store.availableCalendars().isEmpty {
             Task { await store.requestCalendarAccess() } } }
+    }
+
+    private var title: String {
+        let verb = baseBlocked ? "allow" : "block"
+        switch kind {
+        case .calendar: return "Calendar \(verb)"
+        case .focus:    return "Focus \(verb)"
+        case .location: return "Location \(verb)"
+        case .schedule: return baseBlocked ? "Allow window" : "Block window"
+        }
+    }
+
+    // MARK: Focus editor
+
+    private var focusSection: some View {
+        Section {
+            TextField("Focus name (e.g. Work)", text: Binding(
+                get: { if case .duringFocus(let f) = rule.condition { return f.name }; return "" },
+                set: { name in rule.condition = .duringFocus(
+                    FocusSource(id: name.lowercased().trimmingCharacters(in: .whitespaces), name: name)) }))
+                .autocorrectionDisabled()
+        } header: { Text("Focus") } footer: {
+            Text("Add SiteBlocker's Focus Filter to this Focus in Settings › Focus, and enter the same name. The exception applies while that Focus is on.")
+        }
+    }
+
+    // MARK: Location editor
+
+    private var region: GeoRegion {
+        if case .atLocation(let r) = rule.condition { return r }
+        return GeoRegion(name: "", latitude: 0, longitude: 0, radius: 150)
+    }
+    private func setRegion(_ transform: (inout GeoRegion) -> Void) {
+        var r = region; transform(&r); rule.condition = .atLocation(r)
+    }
+    private var locationSection: some View {
+        Section {
+            TextField("Name (e.g. Home)", text: Binding(
+                get: { region.name }, set: { v in setRegion { $0.name = v } }))
+            HStack {
+                Text("Latitude"); Spacer()
+                TextField("0", value: Binding(get: { region.latitude },
+                    set: { v in setRegion { $0.latitude = v } }),
+                          format: .number.precision(.fractionLength(5)))
+                    .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
+            }
+            HStack {
+                Text("Longitude"); Spacer()
+                TextField("0", value: Binding(get: { region.longitude },
+                    set: { v in setRegion { $0.longitude = v } }),
+                          format: .number.precision(.fractionLength(5)))
+                    .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
+            }
+            Stepper("Radius \(Int(region.radius)) m", value: Binding(
+                get: { region.radius }, set: { v in setRegion { $0.radius = v } }),
+                    in: 50...5000, step: 50)
+            Button("Use current location") {
+                if let c = store.currentCoordinate {
+                    setRegion { $0.latitude = c.latitude; $0.longitude = c.longitude }
+                } else { store.requestLocationAccess() }
+            }
+        } header: { Text("Location") } footer: {
+            Text("The exception applies while you're inside this area. Requires “Always” location access to work in the background.")
+        }
     }
 
     /// Pick which calendar's event days drive this exception.
@@ -415,8 +500,8 @@ private struct RuleEditView: View {
         }
 
     private func commit() {
-        // Calendar exceptions manage their own condition via the picker.
-        if isCalendar { rule.dailyLimit = nil; return }
+        // Signal exceptions (calendar/focus/location) manage their own condition via their editors.
+        if kind != .schedule { rule.dailyLimit = nil; return }
         rule.condition = schedule.condition
         rule.dailyLimit = baseBlocked ? schedule.dailyLimit : nil   // a block-window carries no limit
     }

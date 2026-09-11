@@ -50,6 +50,11 @@ targets:
         # (e.g. a US-holidays calendar). SiteBlocker never creates or changes events.
         NSCalendarsUsageDescription: SiteBlocker checks your selected calendars so it can open lists on their event days (for example, holidays).
         NSCalendarsFullAccessUsageDescription: SiteBlocker checks your selected calendars so it can open lists on their event days (for example, holidays).
+        # Location, for exceptions that apply while you're inside a chosen area (geofence). Monitored
+        # in the background so a list can open/close as you arrive or leave.
+        NSLocationUsageDescription: SiteBlocker applies location-based exceptions while you're inside an area you choose.
+        NSLocationWhenInUseUsageDescription: SiteBlocker applies location-based exceptions while you're inside an area you choose.
+        NSLocationAlwaysUsageDescription: SiteBlocker monitors your chosen areas in the background so location-based exceptions apply as you arrive or leave.
         # Menu-bar / agent app: no Dock icon, no default window at launch.
         LSUIElement: true
         # Bump to force the OS to reload the system extension (see settings.base).

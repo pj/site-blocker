@@ -50,6 +50,10 @@ targets:
         # (e.g. a US-holidays calendar). SiteBlocker never creates or changes events.
         NSCalendarsUsageDescription: SiteBlocker checks your selected calendars so it can open lists on their event days (for example, holidays).
         NSCalendarsFullAccessUsageDescription: SiteBlocker checks your selected calendars so it can open lists on their event days (for example, holidays).
+        # Location, for exceptions that apply while you're inside a chosen area (geofence). "Always"
+        # lets a list open/close as you arrive or leave, even when the app isn't in the foreground.
+        NSLocationWhenInUseUsageDescription: SiteBlocker applies location-based exceptions while you're inside an area you choose.
+        NSLocationAlwaysAndWhenInUseUsageDescription: SiteBlocker monitors your chosen areas so location-based exceptions apply as you arrive or leave, even in the background.
         # Reference the build settings (not a baked literal) so `just ios-release`'s timestamp
         # CURRENT_PROJECT_VERSION override flows into CFBundleVersion — TestFlight needs each upload's
         # build number to increase. The app and its extension must carry the *same* version.

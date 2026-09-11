@@ -180,6 +180,12 @@ private struct RulesColumn: View {
                 Button("From calendar…") {
                     list.rules.append(ListRule(condition: .duringCalendarEvent(CalendarSource(id: "", title: "Choose calendar"))))
                 }
+                Button("From Focus…") {
+                    list.rules.append(ListRule(condition: .duringFocus(FocusSource(id: "", name: ""))))
+                }
+                Button("At location…") {
+                    list.rules.append(ListRule(condition: .atLocation(GeoRegion(name: "", latitude: 0, longitude: 0, radius: 150))))
+                }
             } label: {
                 Label("Add exception", systemImage: "plus")
             }
@@ -232,6 +238,8 @@ private struct RuleRow: View {
     @State private var editingDays = false
     @State private var editingTime = false
     @State private var editingLimit = false
+    @State private var editingFocus = false
+    @State private var editingLocation = false
 
     /// Live width of the Days chip, and the width it had when the Days popover opened. While the
     /// popover is open we pin the chip to that frozen width so the anchor can't move — the popover
@@ -255,7 +263,12 @@ private struct RuleRow: View {
                     .help("A list's exceptions are OR'd — any matching one applies")
             }
 
-            if isCalendarException { calendarBox } else { chipBox }
+            switch exceptionKind {
+            case .calendar: calendarBox
+            case .focus:    focusBox
+            case .location: locationBox
+            case .schedule: chipBox
+            }
 
             Button(action: onDelete) { Image(systemName: "minus.circle") }
                 .buttonStyle(.borderless).help("Remove exception")
@@ -266,9 +279,14 @@ private struct RuleRow: View {
         .onChange(of: baseBlocked) { commit() }   // a block-window carries no limit
     }
 
-    private var isCalendarException: Bool {
-        if case .duringCalendarEvent = rule.condition { return true }
-        return false
+    private enum ExceptionKind { case schedule, calendar, focus, location }
+    private var exceptionKind: ExceptionKind {
+        switch rule.condition {
+        case .duringCalendarEvent: return .calendar
+        case .duringFocus:         return .focus
+        case .atLocation:          return .location
+        default:                   return .schedule
+        }
     }
 
     /// A calendar-backed exception: pick the calendar whose event days flip the base state.
@@ -305,6 +323,111 @@ private struct RuleRow: View {
     private var currentCalendarTitle: String {
         if case .duringCalendarEvent(let source) = rule.condition { return source.title }
         return "Choose calendar"
+    }
+
+    /// Styled box shared by the signal exceptions: a leading control + the Allow/Block indicator.
+    private func signalBox<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 6) {
+            content()
+            Divider().frame(height: 16)
+            Text(baseBlocked ? "Allow" : "Block")
+                .font(.caption.weight(.semibold)).foregroundStyle(baseBlocked ? .green : .red)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.18)))
+        .fixedSize()
+    }
+
+    // MARK: Focus exception
+
+    private var focusName: String {
+        if case .duringFocus(let f) = rule.condition { return f.name }
+        return ""
+    }
+    private var focusNameBinding: Binding<String> {
+        Binding(get: { focusName }) { name in
+            rule.condition = .duringFocus(FocusSource(id: FocusBridge.identifier(for: name), name: name))
+        }
+    }
+    private var focusBox: some View {
+        signalBox {
+            Button { editingFocus = true } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "moon.circle").font(.caption2)
+                    Text(focusName.isEmpty ? "Name Focus…" : focusName).font(.caption)
+                }
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $editingFocus, arrowEdge: .bottom) {
+                ChipPopover(title: "Focus name") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        TextField("e.g. Work", text: focusNameBinding)
+                            .textFieldStyle(.roundedBorder).frame(width: 160)
+                        Text("Attach SiteBlocker’s Focus Filter to this Focus in System Settings and use the same name.")
+                            .font(.caption2).foregroundStyle(.secondary).frame(width: 200, alignment: .leading)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Location exception
+
+    private var region: GeoRegion {
+        if case .atLocation(let r) = rule.condition { return r }
+        return GeoRegion(name: "", latitude: 0, longitude: 0, radius: 150)
+    }
+    private func setRegion(_ transform: (inout GeoRegion) -> Void) {
+        var r = region; transform(&r); rule.condition = .atLocation(r)
+    }
+    private var regionSummary: String {
+        let r = region
+        return r.name.isEmpty ? "Set location…" : r.name
+    }
+    private var locationBox: some View {
+        signalBox {
+            Button { editingLocation = true } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "location.circle").font(.caption2)
+                    Text(regionSummary).font(.caption)
+                }
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $editingLocation, arrowEdge: .bottom) {
+                ChipPopover(title: "Location") { locationEditor }
+            }
+        }
+    }
+    private var locationEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Name (e.g. Home)", text: Binding(get: { region.name }) { v in setRegion { $0.name = v } })
+                .textFieldStyle(.roundedBorder).frame(width: 200)
+            HStack(spacing: 6) {
+                coordField("Lat", get: { region.latitude }) { v in setRegion { $0.latitude = v } }
+                coordField("Long", get: { region.longitude }) { v in setRegion { $0.longitude = v } }
+            }
+            HStack(spacing: 6) {
+                Text("Radius").font(.caption).foregroundStyle(.secondary)
+                Stepper("\(Int(region.radius)) m", value: Binding(
+                    get: { region.radius }, set: { v in setRegion { $0.radius = v } }),
+                        in: 50...5000, step: 50).fixedSize()
+            }
+            Button("Use current location") {
+                if let c = store.currentCoordinate {
+                    setRegion { $0.latitude = c.latitude; $0.longitude = c.longitude }
+                } else { Task { await store.requestLocationAccess() } }
+            }
+            .font(.caption)
+        }
+    }
+    private func coordField(_ label: String, get: @escaping () -> Double,
+                            set: @escaping (Double) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            TextField(label, value: Binding(get: get, set: set), format: .number.precision(.fractionLength(5)))
+                .textFieldStyle(.roundedBorder).frame(width: 95)
+        }
     }
 
     /// The exception's conditions (AND'd), then a plain-text indicator of its implied effect.
@@ -401,9 +524,9 @@ private struct RuleRow: View {
     }
 
     private func commit() {
-        // Calendar exceptions manage their own condition via the picker; only the schedule kind
-        // derives its condition from the editor here.
-        if isCalendarException { rule.dailyLimit = nil; return }
+        // Signal exceptions (calendar/focus/location) manage their own condition via their editors;
+        // only the schedule kind derives its condition from the editor here.
+        if exceptionKind != .schedule { rule.dailyLimit = nil; return }
         rule.condition = schedule.condition
         rule.dailyLimit = baseBlocked ? schedule.dailyLimit : nil   // a block-window carries no limit
     }

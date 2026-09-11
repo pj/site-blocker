@@ -106,7 +106,9 @@ enum MobileEnforcer {
             among: Set(loadLists().referencedCalendars.map(\.id)), now: now)
         return RuleContext(now: now, calendar: calendar,
                            unblockedTimeToday: unblockedTimeToday(now: now),
-                           activeCalendarIDs: calendarIDs)
+                           activeCalendarIDs: calendarIDs,
+                           activeFocusIDs: FocusBridge.activeFocusIDs,
+                           insideRegionIDs: LocationBridge.insideRegionIDs)
     }
 
     static func blockedDomainsNow(now: Date = Date()) -> [String] {

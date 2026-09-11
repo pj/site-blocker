@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CoreLocation
 import OSLog
 import RulesEngine
 
@@ -18,6 +19,7 @@ final class RuleStore: ObservableObject {
             persistence.save(lists: lists, usage: usage)
             refresh()
             ensureCalendarAccessIfNeeded()
+            locationMonitor.update(regions: lists.referencedRegions)
         }
     }
 
@@ -49,6 +51,7 @@ final class RuleStore: ObservableObject {
     private let enforcer: Enforcer
     private let persistence: PersistenceController
     private let calendarResolver = CalendarResolver()
+    private let locationMonitor = LocationMonitor()
     private var timer: Timer?
     private var hotKey: GlobalHotKey?
 
@@ -81,6 +84,8 @@ final class RuleStore: ObservableObject {
         observeCloudChanges()
         observeSleepWake()
         resolveSources(force: Set(lists.map(\.id)))
+        locationMonitor.onChange = { [weak self] in self?.refresh() }
+        locationMonitor.update(regions: lists.referencedRegions)
         refresh()
         ensureCalendarAccessIfNeeded()
     }
@@ -148,8 +153,13 @@ final class RuleStore: ObservableObject {
             among: Set(lists.referencedCalendars.map(\.id)), now: now)
         return RuleContext(now: now, calendar: .current,
                            unblockedTimeToday: usage.total(on: now),
-                           activeCalendarIDs: calendarIDs)
+                           activeCalendarIDs: calendarIDs,
+                           activeFocusIDs: FocusBridge.activeFocusIDs,
+                           insideRegionIDs: locationMonitor.insideRegionIDs)
     }
+
+    /// The most recent location fix, for the "use current location" affordance in the editor.
+    var currentCoordinate: CLLocationCoordinate2D? { locationMonitor.currentCoordinate }
 
     /// Calendars the user can attach to an exception (empty until calendar access is granted).
     func availableCalendars() -> [CalendarSource] { calendarResolver.availableCalendars() }
@@ -164,6 +174,11 @@ final class RuleStore: ObservableObject {
     func requestCalendarAccess() async {
         await calendarResolver.requestAccess()
         refresh()
+    }
+
+    /// Prompt for location ("Always") access, needed to monitor location exceptions.
+    func requestLocationAccess() async {
+        locationMonitor.requestAccess()
     }
 
     /// Recompute the live blocked set, hand it to the enforcer, and refresh the shared snapshot.

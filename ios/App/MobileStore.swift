@@ -1,5 +1,6 @@
 import Foundation
 import BackgroundTasks
+import CoreLocation
 import WidgetKit
 import RulesEngine
 
@@ -21,6 +22,7 @@ final class MobileStore: ObservableObject {
         didSet {
             MobileEnforcer.saveLists(lists)
             reevaluate()   // persists + rebuilds the Safari ruleset for the current moment
+            locationMonitor.update(regions: lists.referencedRegions)
         }
     }
     /// Whether the limited lists are currently unlocked (budget draining).
@@ -41,11 +43,15 @@ final class MobileStore: ObservableObject {
     private var remoteLastFetch: [UUID: Date] = [:]
     private let remoteRefreshInterval: TimeInterval = 4 * 3600
 
+    private let locationMonitor = LocationMonitor()
+
     init() {
         lists = MobileEnforcer.loadLists()
         reevaluate()
         resolveRemoteSources()
         ensureCalendarAccessIfNeeded()
+        locationMonitor.onChange = { [weak self] in self?.reevaluate() }
+        locationMonitor.update(regions: lists.referencedRegions)
     }
 
     // MARK: List CRUD (the editor commits a whole list, including its ordered rules)
@@ -169,6 +175,11 @@ final class MobileStore: ObservableObject {
         guard !lists.referencedCalendars.isEmpty, !MobileCalendar.authorized else { return }
         Task { await requestCalendarAccess() }
     }
+
+    // MARK: Location-based exceptions
+
+    var currentCoordinate: CLLocationCoordinate2D? { locationMonitor.currentCoordinate }
+    func requestLocationAccess() { locationMonitor.requestAccess() }
 
     /// Refresh the Control Center toggle so it reflects the current state.
     private func reloadControl() {
