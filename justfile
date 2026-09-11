@@ -28,7 +28,7 @@ gh_repo         := "pj/site-blocker"
 # Public gist holding the shared rules config the iOS app mirrors (see `publish-config`). Not
 # secret — it's a public gist id. Override in .env if you re-create the gist.
 config_gist_id  := env_var_or_default("CONFIG_GIST_ID", "0c8af88a985245f7fbaadf9060bd3341")
-sparkle_version := "2.9.4"
+sparkle_version := "2.9.6"
 sparkle_tools   := ddata / "sparkle-tools"
 
 # List available recipes
