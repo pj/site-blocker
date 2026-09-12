@@ -17,14 +17,15 @@ final class RuleStore: ObservableObject {
     @Published var lists: [SiteList] {
         didSet {
             persistence.save(lists: lists, usage: usage)
-            refresh()
             ensureCalendarAccessIfNeeded()
-            locationMonitor.update(regions: lists.referencedRegions)
+            syncSignalSourcesIfChanged()   // re-query EventKit / re-monitor regions only when changed
+            refresh()                      // reads the cached signals — no EventKit on the edit path
         }
     }
 
-    /// Host patterns actively blocked *right now*. Drives the status view.
-    @Published private(set) var blockedNow: Set<HostPattern> = []
+    /// Host patterns actively blocked *right now* — only fed to the enforcer/snapshot, not the UI, so
+    /// it's not `@Published` (it can hold hundreds of thousands of entries from remote blocklists).
+    private var blockedNow: Set<HostPattern> = []
 
     /// Whether the sites are currently unlocked. Locked by default; not persisted, so every launch
     /// starts locked — the safe default.
@@ -47,11 +48,27 @@ final class RuleStore: ObservableObject {
     /// IDs of lists whose sites are blocked *right now* — for the live per-list status dot.
     @Published private(set) var blockedListIDs: Set<UUID> = []
 
+    /// Most recent location fix, published so the location editor can default a new exception to here.
+    @Published private(set) var currentCoordinate: CLLocationCoordinate2D?
+
     private var usage: DailyUsage
     private let enforcer: Enforcer
     private let persistence: PersistenceController
     private let calendarResolver = CalendarResolver()
     private let locationMonitor = LocationMonitor()
+
+    /// Cached calendar signal, refreshed off the edit path (timer / calendar-set changes) rather than
+    /// re-queried via EventKit on every keystroke. Plus the last-seen signal sources, so an edit only
+    /// re-queries EventKit / re-monitors regions when those sources actually change.
+    private var cachedCalendarIDs: Set<String> = []
+    private var lastReferencedCalendarIDs: Set<String> = []
+    private var lastReferencedRegions: [GeoRegion] = []
+
+    /// Building the blocked-host set (a union of every blocked list's targets — up to hundreds of
+    /// thousands of hosts from remote blocklists) is ~100ms, so it runs off the main thread. A
+    /// generation counter drops stale results when edits arrive faster than the union completes.
+    private let enforcementQueue = DispatchQueue(label: "com.pauljohnson.siteblocker.enforcement")
+    private var enforcementGeneration = 0
     private var timer: Timer?
     private var hotKey: GlobalHotKey?
 
@@ -85,7 +102,12 @@ final class RuleStore: ObservableObject {
         observeSleepWake()
         resolveSources(force: Set(lists.map(\.id)))
         locationMonitor.onChange = { [weak self] in self?.refresh() }
-        locationMonitor.update(regions: lists.referencedRegions)
+        locationMonitor.onLocation = { [weak self] coord in self?.currentCoordinate = coord }
+        currentCoordinate = locationMonitor.currentCoordinate
+        lastReferencedCalendarIDs = Set(lists.referencedCalendars.map(\.id))
+        lastReferencedRegions = lists.referencedRegions
+        locationMonitor.update(regions: lastReferencedRegions)
+        refreshCalendarSignals()
         refresh()
         ensureCalendarAccessIfNeeded()
     }
@@ -149,17 +171,35 @@ final class RuleStore: ObservableObject {
     }
 
     private func liveContext(_ now: Date = Date()) -> RuleContext {
-        let calendarIDs = calendarResolver.activeCalendarIDs(
-            among: Set(lists.referencedCalendars.map(\.id)), now: now)
-        return RuleContext(now: now, calendar: .current,
-                           unblockedTimeToday: usage.total(on: now),
-                           activeCalendarIDs: calendarIDs,
-                           activeFocusIDs: FocusBridge.activeFocusIDs,
-                           insideRegionIDs: locationMonitor.insideRegionIDs)
+        RuleContext(now: now, calendar: .current,
+                    unblockedTimeToday: usage.total(on: now),
+                    activeCalendarIDs: cachedCalendarIDs,
+                    activeFocusIDs: FocusBridge.activeFocusIDs,
+                    insideRegionIDs: locationMonitor.insideRegionIDs)
     }
 
-    /// The most recent location fix, for the "use current location" affordance in the editor.
-    var currentCoordinate: CLLocationCoordinate2D? { locationMonitor.currentCoordinate }
+    /// Re-query EventKit for the active calendars (the expensive call). Called off the edit path —
+    /// periodically from the timer and when the referenced calendar set changes.
+    private func refreshCalendarSignals() {
+        cachedCalendarIDs = calendarResolver.activeCalendarIDs(
+            among: Set(lists.referencedCalendars.map(\.id)))
+    }
+
+    /// When an edit changes which calendars/regions are referenced, re-resolve just those — typing a
+    /// name, toggling a day, etc. leaves them unchanged and skips the expensive work entirely.
+    private func syncSignalSourcesIfChanged() {
+        let calIDs = Set(lists.referencedCalendars.map(\.id))
+        if calIDs != lastReferencedCalendarIDs {
+            lastReferencedCalendarIDs = calIDs
+            refreshCalendarSignals()
+        }
+        let regions = lists.referencedRegions
+        if regions != lastReferencedRegions {
+            lastReferencedRegions = regions
+            locationMonitor.update(regions: regions)
+        }
+    }
+
 
     /// Calendars the user can attach to an exception (empty until calendar access is granted).
     func availableCalendars() -> [CalendarSource] { calendarResolver.availableCalendars() }
@@ -167,12 +207,13 @@ final class RuleStore: ObservableObject {
     /// Ensure calendar access if any list references a calendar; then re-evaluate.
     func ensureCalendarAccessIfNeeded() {
         guard !lists.referencedCalendars.isEmpty, !calendarResolver.authorized else { return }
-        Task { await calendarResolver.requestAccess(); refresh() }
+        Task { await calendarResolver.requestAccess(); refreshCalendarSignals(); refresh() }
     }
 
     /// Prompt for calendar access on demand (e.g. when the user opens the calendar picker).
     func requestCalendarAccess() async {
         await calendarResolver.requestAccess()
+        refreshCalendarSignals()
         refresh()
     }
 
@@ -206,6 +247,7 @@ final class RuleStore: ObservableObject {
         let context = liveContext()
         let engine = ListEngine(lists: lists)
 
+        // Cheap UI-facing state — drives the controls + per-row status dots.
         canUnlock = engine.canUnlock(in: context)
         openAccessActive = engine.openAccessActive(in: context)
         // Auto-lock once nothing limited is left to unlock (windows closed / budgets spent).
@@ -213,26 +255,40 @@ final class RuleStore: ObservableObject {
             isUnlocked = false
             unlockedSince = nil
         }
-
         blockedListIDs = Set(lists.filter {
             engine.decision(for: $0, unlocked: isUnlocked, in: context) == .blocked
         }.map(\.id))
 
-        let previousBlocked = lastBlocked
-        blockedNow = engine.blockedPatterns(unlocked: isUnlocked, in: context)
-        enforcer.apply(blockedPatterns: blockedNow)
-        if blockedNow != lastBlocked {
-            lastBlocked = blockedNow
-            persistence.writeSnapshot(PolicySnapshot(blockedPatterns: blockedNow))
-        }
-
-        let newlyBlocked = blockedNow.subtracting(previousBlocked ?? [])
-        if !newlyBlocked.isEmpty {
-            TabCloser.closeTabs(blockedDomains: Set(newlyBlocked.map(\.domain)))
-        }
+        // Heavy enforcement set — built off the main thread (see `updateEnforcement`).
+        updateEnforcement(lists: lists, unlocked: isUnlocked, context: context)
 
         let total = usage.total()
         if totalUsageToday != total { totalUsageToday = total }
+    }
+
+    /// Build the blocked-host union off the main thread, then apply it (enforcer + snapshot + tab
+    /// closing) back on the main thread. Stale generations are dropped so rapid edits don't pile up.
+    private func updateEnforcement(lists: [SiteList], unlocked: Bool, context: RuleContext) {
+        enforcementGeneration += 1
+        let generation = enforcementGeneration
+        let previous = lastBlocked
+        enforcementQueue.async { [weak self] in
+            let blocked = ListEngine(lists: lists).blockedPatterns(unlocked: unlocked, in: context)
+            let changed = blocked != previous
+            let newlyBlocked = changed ? blocked.subtracting(previous ?? []) : []
+            Task { @MainActor in
+                guard let self, generation == self.enforcementGeneration else { return }
+                self.blockedNow = blocked
+                self.enforcer.apply(blockedPatterns: blocked)
+                if changed {
+                    self.lastBlocked = blocked
+                    self.persistence.writeSnapshot(PolicySnapshot(blockedPatterns: blocked))
+                }
+                if !newlyBlocked.isEmpty {
+                    TabCloser.closeTabs(blockedDomains: Set(newlyBlocked.map(\.domain)))
+                }
+            }
+        }
     }
 
     /// Charge the time since the last tick to the shared daily pool while unlocked. No-op locked.
@@ -469,6 +525,7 @@ final class RuleStore: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.resolveSources()
+                self?.refreshCalendarSignals()   // keep holidays/day-boundaries fresh, off the edit path
                 self?.refresh()
             }
         }

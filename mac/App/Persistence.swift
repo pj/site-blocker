@@ -110,20 +110,30 @@ struct PersistenceController {
         return changed ? Loaded(lists: lists, usage: usage) : nil
     }
 
-    func save(lists: [SiteList], usage: DailyUsage) {
-        if let data = try? JSONEncoder().encode(lists) { try? data.write(to: listsURL) }
-        let usageData = try? JSONEncoder().encode(usage)
-        if let usageData { try? usageData.write(to: usageURL) }
+    /// Serial queue for persistence I/O so saving never blocks the main thread (JSON encoding + two
+    /// file writes + the iCloud key-value `synchronize()` were ~150ms on the edit path).
+    private static let ioQueue = DispatchQueue(label: "com.pauljohnson.siteblocker.persistence")
 
-        guard syncsCloud else { return }
-        if let slim = try? JSONEncoder().encode(lists.map(Self.strippedForSync)) {
-            kv.set(slim, forKey: KVKey.lists)
-            let now = Date().timeIntervalSince1970
-            kv.set(now, forKey: KVKey.listsUpdatedAt)
-            localListsTimestamp = now
+    func save(lists: [SiteList], usage: DailyUsage) {
+        let listsURL = self.listsURL
+        let usageURL = self.usageURL
+        let syncsCloud = self.syncsCloud
+        Self.ioQueue.async {
+            if let data = try? JSONEncoder().encode(lists) { try? data.write(to: listsURL) }
+            let usageData = try? JSONEncoder().encode(usage)
+            if let usageData { try? usageData.write(to: usageURL) }
+
+            guard syncsCloud else { return }
+            let kv = NSUbiquitousKeyValueStore.default
+            if let slim = try? JSONEncoder().encode(lists.map(Self.strippedForSync)) {
+                kv.set(slim, forKey: KVKey.lists)
+                let now = Date().timeIntervalSince1970
+                kv.set(now, forKey: KVKey.listsUpdatedAt)
+                UserDefaults.standard.set(now, forKey: "localListsTimestamp")
+            }
+            if let usageData { kv.set(usageData, forKey: KVKey.usage) }
+            kv.synchronize()
         }
-        if let usageData { kv.set(usageData, forKey: KVKey.usage) }
-        kv.synchronize()
     }
 
     /// Drop cached resolved targets for file/URL-sourced lists before syncing (they re-resolve per
@@ -137,10 +147,18 @@ struct PersistenceController {
         return list
     }
 
+    /// Block until queued save/snapshot writes have flushed. For tests that save then immediately
+    /// load in the same process — the app itself only reloads from disk at launch (a fresh process),
+    /// so the async writes have always drained by then.
+    func flushPendingWrites() { Self.ioQueue.sync {} }
+
     func writeSnapshot(_ snapshot: PolicySnapshot) {
-        let dir = snapshotURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: snapshotURL) }
+        let url = snapshotURL
+        Self.ioQueue.async {
+            let dir = url.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: url) }
+        }
     }
 
     /// Seed content for a fresh install: sites blocked by default, opened by an allow-window

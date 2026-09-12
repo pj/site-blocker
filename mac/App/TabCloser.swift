@@ -19,12 +19,15 @@ enum TabCloser {
     /// the main run loop (they return empty silently). `async` so it doesn't block the caller.
     static func closeTabs(blockedDomains: Set<String>) {
         guard !blockedDomains.isEmpty else { return }
-        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
-        let targets = browsers.filter { running.contains($0.bundleID) }
-        guard !targets.isEmpty else { return }
-        sourceLog.error("TabCloser: \(blockedDomains.count, privacy: .public) blocked domains, browsers=\(targets.map(\.app).joined(separator: ","), privacy: .public)")
-        DispatchQueue.main.async {
-            for browser in targets { close(in: browser, blockedDomains: blockedDomains) }
+        // Enumerate running apps off the main thread — it was ~100ms+ on the refresh path. Only the
+        // Apple Events themselves need the main run loop.
+        DispatchQueue.global(qos: .utility).async {
+            let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+            let targets = browsers.filter { running.contains($0.bundleID) }
+            guard !targets.isEmpty else { return }
+            DispatchQueue.main.async {
+                for browser in targets { close(in: browser, blockedDomains: blockedDomains) }
+            }
         }
     }
 

@@ -312,10 +312,11 @@ private struct RuleSummaryRow: View {
     }
     private var subtitle: String {
         switch rule.condition {
-        case .duringCalendarEvent(let s): return "Calendar · \(s.title)"
-        case .duringFocus(let f):         return "Focus · \(f.name.isEmpty ? "unnamed" : f.name)"
-        case .atLocation(let r):          return "Location · \(r.name.isEmpty ? "unset" : r.name)"
-        default:                          return RuleFormat.schedule(rule, showLimit: baseBlocked)
+        case .duringCalendarEvent(let s):   return "Calendar · \(s.title)"
+        case .duringFocus(let f):           return "Focus · \(f.name.isEmpty ? "unnamed" : f.name)"
+        case .atLocation(let r):            return "Location · at \(r.name.isEmpty ? "unset" : r.name)"
+        case .not(.atLocation(let r)):      return "Location · not at \(r.name.isEmpty ? "unset" : r.name)"
+        default:                            return RuleFormat.schedule(rule, showLimit: baseBlocked)
         }
     }
 }
@@ -350,10 +351,11 @@ private struct RuleEditView: View {
     private enum Kind { case schedule, calendar, focus, location }
     private var kind: Kind {
         switch rule.condition {
-        case .duringCalendarEvent: return .calendar
-        case .duringFocus:         return .focus
-        case .atLocation:          return .location
-        default:                   return .schedule
+        case .duringCalendarEvent:   return .calendar
+        case .duringFocus:           return .focus
+        case .atLocation:            return .location
+        case .not(.atLocation):      return .location   // "while not at" — inverted location
+        default:                     return .schedule
         }
     }
 
@@ -399,41 +401,46 @@ private struct RuleEditView: View {
 
     // MARK: Location editor
 
+    /// True when the rule applies *away from* the region (`.not(.atLocation)`) rather than inside it.
+    private var locationInverted: Bool {
+        if case .not(.atLocation) = rule.condition { return true }
+        return false
+    }
     private var region: GeoRegion {
-        if case .atLocation(let r) = rule.condition { return r }
-        return GeoRegion(name: "", latitude: 0, longitude: 0, radius: 150)
+        switch rule.condition {
+        case .atLocation(let r):        return r
+        case .not(.atLocation(let r)):  return r
+        default:                        return GeoRegion(name: "", latitude: 0, longitude: 0, radius: 150)
+        }
     }
-    private func setRegion(_ transform: (inout GeoRegion) -> Void) {
-        var r = region; transform(&r); rule.condition = .atLocation(r)
+    private func setLocation(region r: GeoRegion, inverted: Bool) {
+        let loc: Condition = .atLocation(r)
+        rule.condition = inverted ? .not(loc) : loc
     }
-    private var locationSection: some View {
+    private var regionBinding: Binding<GeoRegion> {
+        Binding(get: { region }, set: { setLocation(region: $0, inverted: locationInverted) })
+    }
+    private var invertedBinding: Binding<Bool> {
+        Binding(get: { locationInverted }, set: { setLocation(region: region, inverted: $0) })
+    }
+
+    @ViewBuilder private var locationSection: some View {
         Section {
-            TextField("Name (e.g. Home)", text: Binding(
-                get: { region.name }, set: { v in setRegion { $0.name = v } }))
-            HStack {
-                Text("Latitude"); Spacer()
-                TextField("0", value: Binding(get: { region.latitude },
-                    set: { v in setRegion { $0.latitude = v } }),
-                          format: .number.precision(.fractionLength(5)))
-                    .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
+            Picker("", selection: invertedBinding) {
+                Text("While at this location").tag(false)
+                Text("While not at this location").tag(true)
             }
-            HStack {
-                Text("Longitude"); Spacer()
-                TextField("0", value: Binding(get: { region.longitude },
-                    set: { v in setRegion { $0.longitude = v } }),
-                          format: .number.precision(.fractionLength(5)))
-                    .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
-            }
-            Stepper("Radius \(Int(region.radius)) m", value: Binding(
-                get: { region.radius }, set: { v in setRegion { $0.radius = v } }),
-                    in: 50...5000, step: 50)
-            Button("Use current location") {
-                if let c = store.currentCoordinate {
-                    setRegion { $0.latitude = c.latitude; $0.longitude = c.longitude }
-                } else { store.requestLocationAccess() }
-            }
+            .pickerStyle(.segmented)
+        }
+        Section {
+            LocationPicker(region: regionBinding, currentCoordinate: store.currentCoordinate,
+                           requestLocation: { store.requestLocationAccess() })
+                .frame(height: 320)
+                .listRowInsets(EdgeInsets())
         } header: { Text("Location") } footer: {
-            Text("The exception applies while you're inside this area. Requires “Always” location access to work in the background.")
+            Text(locationInverted
+                 ? "The exception applies while you're away from this area. Requires “Always” location access to work in the background."
+                 : "The exception applies while you're inside this area. Requires “Always” location access to work in the background.")
         }
     }
 

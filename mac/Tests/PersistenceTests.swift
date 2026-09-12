@@ -20,7 +20,9 @@ final class PersistenceTests: XCTestCase {
             SiteList(name: "Ads", targets: [], source: .remote(URL(string: "https://e.com/l.txt")!),
                      isBlockedByDefault: true, rules: []),
         ]
-        PersistenceController(overrideDir: dir).save(lists: lists, usage: DailyUsage())
+        let writer = PersistenceController(overrideDir: dir)
+        writer.save(lists: lists, usage: DailyUsage())
+        writer.flushPendingWrites()   // save() writes on a background queue; wait for it
         let loaded = PersistenceController(overrideDir: dir).load()
         XCTAssertEqual(loaded.lists, lists)
     }

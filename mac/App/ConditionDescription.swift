@@ -25,6 +25,8 @@ extension Condition {
             return "while “\(focus.name)” Focus is on"
         case .atLocation(let region):
             return "while at \(region.name)"
+        case .not(.atLocation(let region)):
+            return "while not at \(region.name)"
         case .not(let inner):
             return "not (\(inner.summary))"
         case .allOf(let cs):

@@ -175,21 +175,10 @@ private struct RulesColumn: View {
                     list.rules.removeAll { $0.id == rule.id }
                 }
             }
-            Menu {
-                Button("Schedule") { list.rules.append(ListRule()) }
-                Button("From calendar…") {
-                    list.rules.append(ListRule(condition: .duringCalendarEvent(CalendarSource(id: "", title: "Choose calendar"))))
-                }
-                Button("From Focus…") {
-                    list.rules.append(ListRule(condition: .duringFocus(FocusSource(id: "", name: ""))))
-                }
-                Button("At location…") {
-                    list.rules.append(ListRule(condition: .atLocation(GeoRegion(name: "", latitude: 0, longitude: 0, radius: 150))))
-                }
-            } label: {
+            Button { list.rules.append(ListRule()) } label: {
                 Label("Add exception", systemImage: "plus")
             }
-            .menuStyle(.borderlessButton).buttonStyle(.bordered).controlSize(.small).fixedSize()
+            .buttonStyle(.bordered).controlSize(.small)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -234,26 +223,15 @@ private struct RuleRow: View {
     let baseBlocked: Bool
     let onDelete: () -> Void
 
-    @State private var schedule: RuleSchedule
-    @State private var editingDays = false
-    @State private var editingTime = false
-    @State private var editingLimit = false
-    @State private var editingFocus = false
-    @State private var editingLocation = false
-
-    /// Live width of the Days chip, and the width it had when the Days popover opened. While the
-    /// popover is open we pin the chip to that frozen width so the anchor can't move — the popover
-    /// stays perfectly still as the day-preview text changes, then the chip snaps to fit on close.
-    @State private var daysChipWidth: CGFloat = 0
-    @State private var frozenDaysWidth: CGFloat?
+    @State private var draft: Draft
+    @State private var editing = false
 
     init(rule: Binding<ListRule>, isFirst: Bool, baseBlocked: Bool, onDelete: @escaping () -> Void) {
         _rule = rule
         self.isFirst = isFirst
         self.baseBlocked = baseBlocked
         self.onDelete = onDelete
-        _schedule = State(initialValue: RuleSchedule(condition: rule.wrappedValue.condition,
-                                                     dailyLimit: rule.wrappedValue.dailyLimit))
+        _draft = State(initialValue: Draft(rule: rule.wrappedValue))
     }
 
     var body: some View {
@@ -263,251 +241,223 @@ private struct RuleRow: View {
                     .help("A list's exceptions are OR'd — any matching one applies")
             }
 
-            switch exceptionKind {
-            case .calendar: calendarBox
-            case .focus:    focusBox
-            case .location: locationBox
-            case .schedule: chipBox
-            }
+            summaryButton
 
             Button(action: onDelete) { Image(systemName: "minus.circle") }
                 .buttonStyle(.borderless).help("Remove exception")
 
             Spacer(minLength: 0)
         }
-        .onChange(of: schedule) { commit() }
-        .onChange(of: baseBlocked) { commit() }   // a block-window carries no limit
+        .onChange(of: draft) { apply() }
+        .onChange(of: baseBlocked) { apply() }   // a block-window carries no limit
     }
 
-    private enum ExceptionKind { case schedule, calendar, focus, location }
-    private var exceptionKind: ExceptionKind {
-        switch rule.condition {
-        case .duringCalendarEvent: return .calendar
-        case .duringFocus:         return .focus
-        case .atLocation:          return .location
-        default:                   return .schedule
+    // MARK: Summary row + popover
+
+    private var summaryButton: some View {
+        Button { editing = true } label: {
+            HStack(spacing: 8) {
+                Text(baseBlocked ? "Allow" : "Block")
+                    .font(.caption.weight(.semibold)).foregroundStyle(baseBlocked ? .green : .red)
+                Text(summaryText).font(.caption).foregroundStyle(.primary)
+                Image(systemName: "chevron.down").font(.system(size: 8)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.18)))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $editing, arrowEdge: .bottom) {
+            ScrollView { editor.padding(16).frame(width: 400) }
+                .frame(maxHeight: 640)
         }
     }
 
-    /// A calendar-backed exception: pick the calendar whose event days flip the base state.
-    @ViewBuilder private var calendarBox: some View {
-        HStack(spacing: 6) {
-            Menu {
-                let calendars = store.availableCalendars()
-                if calendars.isEmpty {
-                    Button("Allow calendar access…") { Task { await store.requestCalendarAccess() } }
+    private var summaryText: String {
+        var parts: [String] = []
+        if draft.useCalendar {
+            parts.append(draft.calendar.id.isEmpty ? "no calendar" : draft.calendar.title)
+        } else {
+            var s = [daysText]
+            if draft.schedule.timeEnabled { s.append(timeText) }
+            parts.append(s.joined(separator: " "))
+        }
+        if draft.focusEnabled { parts.append(draft.focus.name.isEmpty ? "a Focus" : "“\(draft.focus.name)”") }
+        if draft.locationEnabled {
+            let place = draft.region.name.isEmpty ? "location" : draft.region.name
+            parts.append("\(draft.locationInverted ? "not at" : "at") \(place)")
+        }
+        if baseBlocked && draft.limitEnabled { parts.append("\(draft.limitMinutes)m/day") }
+        return parts.joined(separator: " · ")
+    }
+
+    // MARK: The single editor (everything on one popover)
+
+    @ViewBuilder private var editor: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Applies-when: schedule OR calendar (mutually exclusive).
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("", selection: $draft.useCalendar) {
+                    Text("Days & times").tag(false)
+                    Text("Calendar days").tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                if draft.useCalendar {
+                    calendarPicker
                 } else {
-                    ForEach(calendars) { cal in
-                        Button(cal.title) { rule.condition = .duringCalendarEvent(cal) }
-                    }
+                    DayCircles(days: $draft.schedule.days)
+                    Divider()
+                    Toggle("Time of day", isOn: $draft.schedule.timeEnabled)
+                    if draft.schedule.timeEnabled { TimeEditor(window: $draft.schedule.window) }
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "calendar").font(.caption2)
-                    Text(currentCalendarTitle).font(.caption)
-                }
-            }
-            .menuStyle(.borderlessButton).fixedSize()
-            .onAppear { if store.availableCalendars().isEmpty { Task { await store.requestCalendarAccess() } } }
-
-            Divider().frame(height: 16)
-            Text(baseBlocked ? "Allow" : "Block")
-                .font(.caption.weight(.semibold)).foregroundStyle(baseBlocked ? .green : .red)
-        }
-        .padding(.horizontal, 8).padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.18)))
-        .fixedSize()
-    }
-
-    private var currentCalendarTitle: String {
-        if case .duringCalendarEvent(let source) = rule.condition { return source.title }
-        return "Choose calendar"
-    }
-
-    /// Styled box shared by the signal exceptions: a leading control + the Allow/Block indicator.
-    private func signalBox<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        HStack(spacing: 6) {
-            content()
-            Divider().frame(height: 16)
-            Text(baseBlocked ? "Allow" : "Block")
-                .font(.caption.weight(.semibold)).foregroundStyle(baseBlocked ? .green : .red)
-        }
-        .padding(.horizontal, 8).padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.18)))
-        .fixedSize()
-    }
-
-    // MARK: Focus exception
-
-    private var focusName: String {
-        if case .duringFocus(let f) = rule.condition { return f.name }
-        return ""
-    }
-    private var focusNameBinding: Binding<String> {
-        Binding(get: { focusName }) { name in
-            rule.condition = .duringFocus(FocusSource(id: FocusBridge.identifier(for: name), name: name))
-        }
-    }
-    private var focusBox: some View {
-        signalBox {
-            Button { editingFocus = true } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "moon.circle").font(.caption2)
-                    Text(focusName.isEmpty ? "Name Focus…" : focusName).font(.caption)
-                }
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $editingFocus, arrowEdge: .bottom) {
-                ChipPopover(title: "Focus name") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        TextField("e.g. Work", text: focusNameBinding)
-                            .textFieldStyle(.roundedBorder).frame(width: 160)
-                        Text("Attach SiteBlocker’s Focus Filter to this Focus in System Settings and use the same name.")
-                            .font(.caption2).foregroundStyle(.secondary).frame(width: 200, alignment: .leading)
+                if baseBlocked {
+                    Divider()
+                    Toggle("Daily limit", isOn: $draft.limitEnabled)
+                    if draft.limitEnabled {
+                        Stepper("\(draft.limitMinutes) min/day", value: $draft.limitMinutes, in: 5...240, step: 5)
                     }
                 }
             }
+
+            Divider()
+            Toggle("Only while a Focus is on", isOn: $draft.focusEnabled)
+            if draft.focusEnabled {
+                TextField("Focus name (e.g. Work)", text: $draft.focus.name).textFieldStyle(.roundedBorder)
+                Text("Attach SiteBlocker’s Focus Filter to this Focus in System Settings and use the same name.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+
+            Divider()
+            Toggle("Only based on a location", isOn: $draft.locationEnabled)
+            if draft.locationEnabled {
+                Picker("", selection: $draft.locationInverted) {
+                    Text("While at this location").tag(false)
+                    Text("While not at this location").tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                locationFields
+            }
         }
     }
 
-    // MARK: Location exception
+    @ViewBuilder private var calendarPicker: some View {
+        let calendars = store.availableCalendars()
+        if calendars.isEmpty {
+            Button("Allow calendar access…") { Task { await store.requestCalendarAccess() } }
+                .onAppear { Task { await store.requestCalendarAccess() } }
+        } else {
+            Picker("Calendar", selection: calendarSelection) {
+                Text("Choose calendar").tag("")
+                ForEach(calendars) { Text($0.title).tag($0.id) }
+            }
+            Text("Applies on days this calendar has an event (e.g. holidays).")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
 
-    private var region: GeoRegion {
-        if case .atLocation(let r) = rule.condition { return r }
-        return GeoRegion(name: "", latitude: 0, longitude: 0, radius: 150)
+    private var calendarSelection: Binding<String> {
+        Binding(get: { draft.calendar.id }, set: { id in
+            let title = store.availableCalendars().first { $0.id == id }?.title ?? "Choose calendar"
+            draft.calendar = CalendarSource(id: id, title: title)
+        })
     }
-    private func setRegion(_ transform: (inout GeoRegion) -> Void) {
-        var r = region; transform(&r); rule.condition = .atLocation(r)
+
+    @ViewBuilder private var locationFields: some View {
+        LocationPicker(region: $draft.region, currentCoordinate: store.currentCoordinate) {
+            Task { await store.requestLocationAccess() }
+        }
     }
-    private var regionSummary: String {
-        let r = region
-        return r.name.isEmpty ? "Set location…" : r.name
-    }
-    private var locationBox: some View {
-        signalBox {
-            Button { editingLocation = true } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "location.circle").font(.caption2)
-                    Text(regionSummary).font(.caption)
+
+    // MARK: Draft ⇄ rule
+
+    /// The editor's state: a schedule *or* a calendar for "when", plus optional Focus and Location
+    /// constraints that AND together, plus an optional daily limit.
+    private struct Draft: Equatable {
+        var useCalendar = false
+        var calendar = CalendarSource(id: "", title: "Choose calendar")
+        var schedule = RuleSchedule()
+        var focusEnabled = false
+        var focus = FocusSource(id: "", name: "")
+        var locationEnabled = false
+        var locationInverted = false   // true = applies while *away from* the region
+        var region = GeoRegion(name: "", latitude: 0, longitude: 0, radius: 150)
+        var limitEnabled = false
+        var limitMinutes = 30
+
+        init() {}
+
+        init(rule: ListRule) {
+            let flat = Draft.flatten(rule.condition)
+            if let cal = flat.compactMap({ c -> CalendarSource? in
+                if case .duringCalendarEvent(let s) = c { return s }; return nil }).first {
+                useCalendar = true; calendar = cal
+            }
+            schedule = RuleSchedule(condition: rule.condition, dailyLimit: nil)   // days/time only
+            if let f = flat.compactMap({ c -> FocusSource? in
+                if case .duringFocus(let s) = c { return s }; return nil }).first {
+                focusEnabled = true; focus = f
+            }
+            for c in flat {
+                if case .atLocation(let s) = c {
+                    locationEnabled = true; region = s; locationInverted = false; break
+                }
+                if case .not(let inner) = c, case .atLocation(let s) = inner {
+                    locationEnabled = true; region = s; locationInverted = true; break
                 }
             }
-            .buttonStyle(.plain)
-            .popover(isPresented: $editingLocation, arrowEdge: .bottom) {
-                ChipPopover(title: "Location") { locationEditor }
+            if let limit = rule.dailyLimit { limitEnabled = true; limitMinutes = max(1, Int(limit / 60)) }
+        }
+
+        private static func flatten(_ c: Condition) -> [Condition] {
+            if case .allOf(let list) = c { return list }
+            return [c]
+        }
+
+        /// Build the composite condition + daily limit for the current base state.
+        func resolve(baseBlocked: Bool) -> (Condition, TimeInterval?) {
+            var parts: [Condition] = []
+            if useCalendar {
+                // No calendar chosen yet → the exception applies on *no* days (never), rather than
+                // falling through to `.always` (every day).
+                parts.append(calendar.id.isEmpty ? .not(.always) : .duringCalendarEvent(calendar))
+            } else {
+                let s = schedule.condition
+                if s != .always { parts.append(s) }
             }
+            if focusEnabled {
+                parts.append(.duringFocus(FocusSource(id: FocusBridge.identifier(for: focus.name),
+                                                      name: focus.name)))
+            }
+            if locationEnabled {
+                let loc: Condition = .atLocation(region)
+                parts.append(locationInverted ? .not(loc) : loc)
+            }
+            let condition: Condition = parts.isEmpty ? .always
+                : (parts.count == 1 ? parts[0] : .allOf(parts))
+            let limit: TimeInterval? = (baseBlocked && limitEnabled)
+                ? TimeInterval(limitMinutes * 60) : nil
+            return (condition, limit)
         }
     }
-    private var locationEditor: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TextField("Name (e.g. Home)", text: Binding(get: { region.name }) { v in setRegion { $0.name = v } })
-                .textFieldStyle(.roundedBorder).frame(width: 200)
-            HStack(spacing: 6) {
-                coordField("Lat", get: { region.latitude }) { v in setRegion { $0.latitude = v } }
-                coordField("Long", get: { region.longitude }) { v in setRegion { $0.longitude = v } }
-            }
-            HStack(spacing: 6) {
-                Text("Radius").font(.caption).foregroundStyle(.secondary)
-                Stepper("\(Int(region.radius)) m", value: Binding(
-                    get: { region.radius }, set: { v in setRegion { $0.radius = v } }),
-                        in: 50...5000, step: 50).fixedSize()
-            }
-            Button("Use current location") {
-                if let c = store.currentCoordinate {
-                    setRegion { $0.latitude = c.latitude; $0.longitude = c.longitude }
-                } else { Task { await store.requestLocationAccess() } }
-            }
-            .font(.caption)
-        }
-    }
-    private func coordField(_ label: String, get: @escaping () -> Double,
-                            set: @escaping (Double) -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(.caption2).foregroundStyle(.secondary)
-            TextField(label, value: Binding(get: get, set: set), format: .number.precision(.fractionLength(5)))
-                .textFieldStyle(.roundedBorder).frame(width: 95)
-        }
+
+    private func apply() {
+        let (condition, limit) = draft.resolve(baseBlocked: baseBlocked)
+        guard rule.condition != condition || rule.dailyLimit != limit else { return }
+        // Write both fields in one assignment so the store's @Published lists mutates once (two
+        // separate property writes would fire didSet — and a full save/refresh — twice per edit).
+        var updated = rule
+        updated.condition = condition
+        updated.dailyLimit = limit
+        rule = updated
     }
 
-    /// The exception's conditions (AND'd), then a plain-text indicator of its implied effect.
-    private var chipBox: some View {
-        HStack(spacing: 6) {
-            // Days chip (always present — an exception always applies on some days).
-            Chip(icon: "calendar", text: daysText, tint: schedule.days.isEmpty ? .orange : .secondary)
-                { frozenDaysWidth = daysChipWidth; editingDays = true }
-                .frame(width: frozenDaysWidth, alignment: .leading)   // pinned while the popover is open
-                .background(GeometryReader { g in
-                    Color.clear
-                        .onAppear { daysChipWidth = g.size.width }
-                        .onChange(of: g.size.width) { if frozenDaysWidth == nil { daysChipWidth = $0 } }
-                })
-                .popover(isPresented: $editingDays, arrowEdge: .bottom,
-                         content: { ChipPopover(title: "Days") { DayCircles(days: $schedule.days) } })
-                .onChange(of: editingDays) { if !$0 { frozenDaysWidth = nil } }   // release on close
+    // MARK: Text helpers
 
-            // Time chip (optional) — ANDed with the other conditions.
-            if schedule.timeEnabled {
-                andLabel
-                Chip(icon: "clock", text: timeText, onRemove: { schedule.timeEnabled = false })
-                    { editingTime = true }
-                    .popover(isPresented: $editingTime, arrowEdge: .bottom) {
-                        ChipPopover(title: "Time of day") { TimeEditor(window: $schedule.window) }
-                    }
-            }
-
-            // Daily-limit chip (Allow-windows only) — ANDed with the other conditions.
-            if baseBlocked && schedule.quotaEnabled {
-                andLabel
-                Chip(icon: "hourglass", text: "\(schedule.quotaMinutes)m/day",
-                     tint: exhausted ? .red : .secondary,
-                     onRemove: { schedule.quotaEnabled = false }) { editingLimit = true }
-                    .popover(isPresented: $editingLimit, arrowEdge: .bottom) {
-                        ChipPopover(title: "Daily limit") {
-                            Stepper("\(schedule.quotaMinutes) min/day",
-                                    value: $schedule.quotaMinutes, in: 5...240, step: 5).fixedSize()
-                        }
-                    }
-            }
-
-            if canAdd {
-                Menu {
-                    if !schedule.timeEnabled {
-                        Button("Time of day") { schedule.timeEnabled = true; editingTime = true }
-                    }
-                    if baseBlocked && !schedule.quotaEnabled {
-                        Button("Daily limit") { schedule.quotaEnabled = true; editingLimit = true }
-                    }
-                } label: {
-                    Image(systemName: "plus.circle").foregroundStyle(.secondary)
-                }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .help("Add a condition (AND)")
-            }
-
-            Divider().frame(height: 16)
-            Text(baseBlocked ? "Allow" : "Block")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(baseBlocked ? .green : .red)
-                .help(baseBlocked ? "Opens these sites while active" : "Blocks these sites while active")
-        }
-        .padding(.horizontal, 8).padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.18)))
-        .fixedSize()
-    }
-
-    private var canAdd: Bool {
-        !schedule.timeEnabled || (baseBlocked && !schedule.quotaEnabled)
-    }
-    private var exhausted: Bool {
-        schedule.quotaEnabled && store.totalUsageToday >= TimeInterval(schedule.quotaMinutes * 60)
-    }
     private var timeText: String {
-        "\(clock(schedule.window.startMinutes))–\(clock(schedule.window.endMinutes))"
+        "\(clock(draft.schedule.window.startMinutes))–\(clock(draft.schedule.window.endMinutes))"
     }
     private var daysText: String {
-        let d = schedule.days
+        let d = draft.schedule.days
         if d == RuleSchedule.everyDay { return "Every day" }
         if d.isEmpty { return "Never" }
         let weekdays: Set<Weekday> = [.monday, .tuesday, .wednesday, .thursday, .friday]
@@ -516,20 +466,6 @@ private struct RuleRow: View {
         return Weekday.allCases.filter(d.contains).map(\.shortLabel).joined(separator: ", ")
     }
     private func clock(_ m: Int) -> String { String(format: "%02d:%02d", m / 60, m % 60) }
-
-    /// Separator between a rule's condition chips (they're AND'd together).
-    private var andLabel: some View {
-        Text("AND").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
-            .help("All of a rule's conditions must match (AND)")
-    }
-
-    private func commit() {
-        // Signal exceptions (calendar/focus/location) manage their own condition via their editors;
-        // only the schedule kind derives its condition from the editor here.
-        if exceptionKind != .schedule { rule.dailyLimit = nil; return }
-        rule.condition = schedule.condition
-        rule.dailyLimit = baseBlocked ? schedule.dailyLimit : nil   // a block-window carries no limit
-    }
 }
 
 // MARK: - Chip + popover building blocks

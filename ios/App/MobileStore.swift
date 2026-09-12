@@ -35,6 +35,8 @@ final class MobileStore: ObservableObject {
     @Published private(set) var blockedListIDs: Set<UUID> = MobileEnforcer.blockedListIDs()
     /// Master switch: whether blocking is paused across every list.
     @Published private(set) var isDisabled: Bool = MobileEnforcer.isBlockingDisabled
+    /// Most recent location fix, published so the location editor can default a new exception to here.
+    @Published private(set) var currentCoordinate: CLLocationCoordinate2D?
 
     /// Fires while foregrounded so a schedule boundary crossed with the app open takes effect promptly.
     private var tick: Timer?
@@ -51,6 +53,8 @@ final class MobileStore: ObservableObject {
         resolveRemoteSources()
         ensureCalendarAccessIfNeeded()
         locationMonitor.onChange = { [weak self] in self?.reevaluate() }
+        locationMonitor.onLocation = { [weak self] coord in self?.currentCoordinate = coord }
+        currentCoordinate = locationMonitor.currentCoordinate
         locationMonitor.update(regions: lists.referencedRegions)
     }
 
@@ -178,7 +182,6 @@ final class MobileStore: ObservableObject {
 
     // MARK: Location-based exceptions
 
-    var currentCoordinate: CLLocationCoordinate2D? { locationMonitor.currentCoordinate }
     func requestLocationAccess() { locationMonitor.requestAccess() }
 
     /// Refresh the Control Center toggle so it reflects the current state.

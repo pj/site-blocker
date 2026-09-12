@@ -22,8 +22,8 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # Bump on any change that must reload the *system extension*: the OS only swaps in a new
     # extension binary when its version increases. App + extension stay in lockstep.
-    MARKETING_VERSION: "2.8"
-    CURRENT_PROJECT_VERSION: "19"
+    MARKETING_VERSION: "2.9"
+    CURRENT_PROJECT_VERSION: "20"
 
 targets:
   SiteBlocker:
@@ -55,6 +55,8 @@ targets:
         NSLocationUsageDescription: SiteBlocker applies location-based exceptions while you're inside an area you choose.
         NSLocationWhenInUseUsageDescription: SiteBlocker applies location-based exceptions while you're inside an area you choose.
         NSLocationAlwaysUsageDescription: SiteBlocker monitors your chosen areas in the background so location-based exceptions apply as you arrive or leave.
+        # The combined key is the one modern macOS actually requires to show the "Always" prompt.
+        NSLocationAlwaysAndWhenInUseUsageDescription: SiteBlocker monitors your chosen areas so location-based exceptions apply as you arrive or leave.
         # Menu-bar / agent app: no Dock icon, no default window at launch.
         LSUIElement: true
         # Bump to force the OS to reload the system extension (see settings.base).

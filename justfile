@@ -119,6 +119,12 @@ build: generate
         -destination 'platform=macOS' -derivedDataPath {{ddata}} \
         CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build | xcbeautify
 
+# End-to-end tests on the Tart VM (macos-dev): builds the app + sb-driver on the host, copies them
+# into the VM, drives the real app in its GUI session, and asserts on the PolicySnapshot the
+# content-filter extension reads. See vm/README.md. Pass args through, e.g. `just e2e --keep`.
+e2e *ARGS:
+    ./vm/run-e2e.sh {{ARGS}}
+
 # Headless macOS persistence tests
 mac-test: generate
     xcodebuild test -project {{project}} -scheme SiteBlockerTests \
