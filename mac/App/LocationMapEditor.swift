@@ -209,10 +209,12 @@ final class PlaceSearchModel: NSObject, ObservableObject, MKLocalSearchCompleter
     /// location, which arrive without a search title).
     func name(for coord: CLLocationCoordinate2D, then apply: @escaping (String) -> Void) {
         let loc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
-        CLGeocoder().reverseGeocodeLocation(loc) { placemarks, _ in
+        // Use the async geocode API so `apply` (non-Sendable) is only ever touched on the main
+        // actor, never captured into the geocoder's @Sendable completion handler.
+        Task { @MainActor in
+            let placemarks = try? await CLGeocoder().reverseGeocodeLocation(loc)
             let p = placemarks?.first
-            let name = p?.name ?? p?.thoroughfare ?? p?.locality ?? "Dropped pin"
-            Task { @MainActor in apply(name) }
+            apply(p?.name ?? p?.thoroughfare ?? p?.locality ?? "Dropped pin")
         }
     }
 
