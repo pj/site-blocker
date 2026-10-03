@@ -17,7 +17,6 @@ struct ContentView: View {
                 Section {
                     lockRow
                     budgetLine
-                    blockingRow
                 } footer: { Text(lockFooter) }
 
                 Section("Site lists") {
@@ -53,21 +52,6 @@ struct ContentView: View {
                 Label("Locked", systemImage: "lock.fill").foregroundStyle(.secondary)
                 Spacer()
                 Button("Unlock") { Task { await store.unlock() } }.disabled(!store.canUnlock)
-            }
-        }
-    }
-
-    /// Master enable/disable for all blocking, mirroring the desktop's top-bar control.
-    private var blockingRow: some View {
-        HStack {
-            if store.isDisabled {
-                Label("Blocking disabled", systemImage: "pause.circle.fill").foregroundStyle(.orange)
-                Spacer()
-                Button("Enable") { Task { await store.setDisabled(false) } }
-            } else {
-                Label("Blocking on", systemImage: "shield.fill").foregroundStyle(.secondary)
-                Spacer()
-                Button("Disable") { Task { await store.setDisabled(true) } }
             }
         }
     }

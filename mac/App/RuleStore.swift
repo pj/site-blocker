@@ -377,18 +377,6 @@ final class RuleStore: ObservableObject {
         if isUnlocked { lock() } else { await unlock() }
     }
 
-    /// Master enable/disable for all blocking. Disabling loosens enforcement, so it's gated behind
-    /// Touch ID; re-enabling is stricter and needs no auth.
-    func toggleDisabledAuthenticated() async {
-        if !isDisabled {
-            guard await Authentication.confirm(reason: "disable all blocking") else { return }
-            isDisabled = true
-        } else {
-            isDisabled = false
-        }
-        refresh()
-    }
-
     func unlock() async {
         guard ListEngine(lists: lists).canUnlock(in: liveContext()) else { return }
         guard await Authentication.confirm(reason: "unlock the blocked sites") else { return }

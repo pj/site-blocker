@@ -48,6 +48,9 @@ final class MobileStore: ObservableObject {
     private let locationMonitor = LocationMonitor()
 
     init() {
+        // Blocking can no longer be disabled from the UI; clear any previously persisted
+        // disabled state so enforcement always resumes on launch.
+        MobileEnforcer.isBlockingDisabled = false
         lists = MobileEnforcer.loadLists()
         reevaluate()
         resolveRemoteSources()
@@ -129,18 +132,6 @@ final class MobileStore: ObservableObject {
     func lock() {
         MobileEnforcer.setUnlocked(false)
         reevaluate()
-    }
-
-    /// Master enable/disable for all blocking. Disabling loosens enforcement, so it needs Face ID;
-    /// re-enabling is stricter and needs none.
-    @discardableResult
-    func setDisabled(_ on: Bool) async -> Bool {
-        if on {
-            guard await Authentication.confirm(reason: "Disable all blocking") else { return false }
-        }
-        MobileEnforcer.isBlockingDisabled = on
-        reevaluate()
-        return true
     }
 
     // MARK: Wake signals

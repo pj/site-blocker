@@ -18,17 +18,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(store.isUnlocked ? .green : .red)
-                .disabled(store.isDisabled || (!store.isUnlocked && !store.canUnlock))
-
-                Button {
-                    Task { await store.toggleDisabledAuthenticated() }
-                } label: {
-                    Label(store.isDisabled ? "Enable blocking" : "Disable blocking",
-                          systemImage: store.isDisabled ? "play.fill" : "pause.fill")
-                }
-                .buttonStyle(.bordered)
-                .help(store.isDisabled ? "Resume blocking on all lists"
-                                       : "Pause blocking on all lists (requires authentication)")
+                .disabled(!store.isUnlocked && !store.canUnlock)
 
                 Text(statusText).font(.callout).foregroundStyle(.secondary)
                 Spacer()
