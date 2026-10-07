@@ -1,7 +1,7 @@
 # SiteBlocker VM end-to-end tests
 
-End-to-end testing for the SiteBlocker **macOS** app on a [Tart](https://tart.run/) VM (`macos-dev`),
-modelled on the harness in the `window_thing` repo.
+End-to-end testing for the SiteBlocker **macOS** app on a dedicated [Tart](https://tart.run/) VM
+(`siteblocker-e2e`), modelled on the harness in the `window_thing` repo.
 
 It drives the *real* app through its whole pipeline — load `lists.json` → `ListEngine` → `Enforcer`
 → write `PolicySnapshot` — and asserts on the snapshot the content-filter system extension reads
@@ -14,8 +14,15 @@ brew install cirruslabs/cli/tart
 brew install hudochenkov/sshpass/sshpass
 ```
 
-A built `macos-dev` VM (shared with other projects). The host needs the usual SiteBlocker build
-toolchain (`just build` must work).
+The Tart VMs live on an external drive at **`/Volumes/VMs/tart`** (`TART_HOME`); that drive must be
+mounted. On its first run the harness clones a SiteBlocker-dedicated VM, `siteblocker-e2e`, from the
+clean base image `macos-dev-golden` (APFS copy-on-write, so it's near-instant and costs almost no
+extra space until it diverges). Having our own copy decouples E2E from the shared `macos-dev` VM.
+The host needs the usual SiteBlocker build toolchain (`just build` must work).
+
+Overridable via environment: `TART_HOME` (VMs location), `VM_NAME` (default `siteblocker-e2e`),
+`BASE_VM` (clone source, default `macos-dev-golden`). Delete the dedicated VM to reset it from the
+base: `TART_HOME=/Volumes/VMs/tart tart delete siteblocker-e2e` (the next run re-clones it).
 
 ## Run
 
@@ -71,7 +78,7 @@ suffix rule `sb-driver` applies — so a snapshot verdict is the allow/deny the 
 return for that hostname.
 
 **Does not prove** a live packet drop. Installing the `NEFilterDataProvider` system extension needs
-sysext approval, and `macos-dev` has **SIP enabled**, so it can neither enable
+sysext approval, and `siteblocker-e2e` (like its base image) has **SIP enabled**, so it can neither enable
 `systemextensionsctl developer` mode (needs SIP off) nor surface the notarized-app approval flow
 headlessly. Closing that gap needs one of:
 - a notarized Release build (`just package`) installed in the VM, approved once on the VM's screen

@@ -12,7 +12,14 @@
 #   ./vm/run-e2e.sh --skip-unit   # skip the host-side RulesEngine unit tests
 set -euo pipefail
 
-VM_NAME="${VM_NAME:-macos-dev}"
+# The Tart VMs were moved off the internal disk to an external drive for space. Point every tart
+# invocation below at it unless the caller overrides TART_HOME; the drive must be mounted.
+export TART_HOME="${TART_HOME:-/Volumes/VMs/tart}"
+
+# A SiteBlocker-dedicated VM, cloned on first run from BASE_VM (a clean base image). Having our own
+# copy decouples E2E from the shared macos-dev VM.
+VM_NAME="${VM_NAME:-siteblocker-e2e}"
+BASE_VM="${BASE_VM:-macos-dev-golden}"
 SSH_USER="admin"
 SSH_PASS="admin"
 SSH_TIMEOUT=90
@@ -29,10 +36,22 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 check_tart()    { command -v tart    >/dev/null || { log_error "tart not installed (brew install cirruslabs/cli/tart)"; exit 1; }; }
 check_sshpass() { command -v sshpass >/dev/null || { log_error "sshpass not installed (brew install hudochenkov/sshpass/sshpass)"; exit 1; }; }
-check_vm()      { tart list | grep -q "${VM_NAME}" || { log_error "VM '${VM_NAME}' not found"; exit 1; }; }
+check_tart_home() { [ -d "$TART_HOME/vms" ] || { log_error "TART_HOME '$TART_HOME' has no vms/ — is the VMs drive mounted?"; exit 1; }; }
 
-is_vm_running() { tart list | grep "${VM_NAME}" | grep -q "running"; }
+# Exact match on tart list's Name column (Source=$1, Name=$2, …, State=$NF). A substring grep would
+# conflate e.g. 'macos-dev' with 'macos-dev-golden'.
+vm_exists()     { tart list | awk 'NR>1 {print $2}' | grep -qxF "$1"; }
+is_vm_running() { [ "$(tart list | awk -v n="$VM_NAME" 'NR>1 && $2==n {print $NF}')" = "running" ]; }
 get_vm_ip()     { tart ip "$VM_NAME" 2>/dev/null || echo ""; }
+
+# Clone our dedicated VM from the base image on first run. Tart uses APFS copy-on-write on the same
+# volume, so this is near-instant and costs almost no extra space until the clone diverges.
+ensure_vm() {
+    vm_exists "$VM_NAME" && return 0
+    vm_exists "$BASE_VM" || { log_error "VM '$VM_NAME' not found and base '$BASE_VM' missing — nothing to clone"; exit 1; }
+    log_info "VM '$VM_NAME' not found — cloning from '$BASE_VM'..."
+    tart clone "$BASE_VM" "$VM_NAME"
+}
 
 # --------------------------------------------------------------------------- #
 # SSH / rsync — password auth, upgrading to a key (macOS sshd rejects rapid    #
@@ -141,7 +160,7 @@ main() {
         esac
     done
 
-    check_tart; check_sshpass; check_vm
+    check_tart; check_sshpass; check_tart_home; ensure_vm
 
     # A compile error should not cost a VM boot.
     build_artifacts || exit 1
